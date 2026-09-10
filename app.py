@@ -505,11 +505,22 @@ def process_address(address, progress=None):
 # ============================================================
 # 7. UI
 # ============================================================
+# ============================================================
+# 7. UI
+# ============================================================
 st.title("🏠 건축물 전용면적 조회")
 
 # ---------- 🔍 도로명주소 검색 (보조 도구) ----------
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 동아아파트) 또는 주소 일부(예: 신반포로33길)를 입력하세요.")
+
+    # 검색 결과를 세션에 유지 (이게 핵심!)
+    if "search_candidates" not in st.session_state:
+        st.session_state.search_candidates = []
+    if "search_error" not in st.session_state:
+        st.session_state.search_error = None
+    if "search_performed" not in st.session_state:
+        st.session_state.search_performed = False
 
     col1, col2 = st.columns([4, 1])
     with col1:
@@ -528,40 +539,57 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         else:
             with st.spinner("검색 중..."):
                 candidates, err = search_address_candidates(search_kw.strip(), count=20)
-            if err:
-                st.error(f"검색 실패: {err}")
-            elif not candidates:
-                st.info("검색 결과가 없습니다.")
-            else:
-                st.success(f"총 {len(candidates)}건 검색됨")
+            st.session_state.search_candidates = candidates
+            st.session_state.search_error = err
+            st.session_state.search_performed = True
 
-                # 결과를 어느 주소창에 넣을지 선택
-                target_slot = st.selectbox(
-                    "⬆️ 이 주소를 넣을 위치",
-                    options=list(range(1, 11)),
-                    format_func=lambda x: f"주소 {x}",
-                    key="target_slot"
-                )
+    # ★ 세션에 저장된 결과를 매 run마다 렌더 (검색 버튼 안 눌러도 유지됨) ★
+    if st.session_state.search_performed:
+        err = st.session_state.search_error
+        candidates = st.session_state.search_candidates
 
-                for i, c in enumerate(candidates, start=1):
-                    with st.container(border=True):
-                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
-                        if c["건물명"]:
-                            st.caption(f"🏢 건물명: {c['건물명']}")
-                        if c["지번주소"]:
-                            st.caption(f"📍 지번: {c['지번주소']}")
-                        if c["동목록"]:
-                            dong_preview = c["동목록"]
-                            if len(dong_preview) > 200:
-                                dong_preview = dong_preview[:200] + "..."
-                            st.caption(f"🏠 동목록: {dong_preview}")
+        if err:
+            st.error(f"검색 실패: {err}")
+        elif not candidates:
+            st.info("검색 결과가 없습니다.")
+        else:
+            st.success(f"총 {len(candidates)}건 검색됨")
 
-                        if st.button(f"⬆️ 주소 {target_slot}에 넣기", key=f"use_{i}"):
-                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
-                            st.success(f"주소 {target_slot}에 입력했습니다. 아래 조회창에서 확인하세요.")
-                            st.rerun()
+            target_slot = st.selectbox(
+                "⬆️ 이 주소를 넣을 위치",
+                options=list(range(1, 11)),
+                format_func=lambda x: f"주소 {x}",
+                key="target_slot"
+            )
+
+            for i, c in enumerate(candidates, start=1):
+                with st.container(border=True):
+                    st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                    if c["건물명"]:
+                        st.caption(f"🏢 건물명: {c['건물명']}")
+                    if c["지번주소"]:
+                        st.caption(f"📍 지번: {c['지번주소']}")
+                    if c["동목록"]:
+                        dong_preview = c["동목록"]
+                        if len(dong_preview) > 200:
+                            dong_preview = dong_preview[:200] + "..."
+                        st.caption(f"🏠 동목록: {dong_preview}")
+
+                    if st.button(f"⬆️ 주소 {target_slot}에 넣기", key=f"use_{i}"):
+                        # ① 텍스트 인풋의 세션 값 갱신
+                        st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
+                        # ② rerun 후 표시할 플래시 메시지 저장
+                        st.session_state["_flash_msg"] = (
+                            f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소']}"
+                        )
+                        st.rerun()
 
 st.markdown("---")
+
+# ---------- 플래시 메시지 (rerun 후 1회만 표시) ----------
+_flash = st.session_state.pop("_flash_msg", None)
+if _flash:
+    st.success(_flash)
 
 # ---------- 기존 전용면적 조회 ----------
 st.subheader("📋 전용면적 조회")
@@ -614,4 +642,4 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         file_name="전용면적_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                )
+    )
