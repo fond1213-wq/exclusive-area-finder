@@ -41,22 +41,22 @@ def extract_numbers(value):
 def extract_dong_ho(address):
     text = str(address).strip()
     
-    # 1. 103동 701호 / 129동 2103호 형태
+    # 103동 701호 형태
     m = re.search(r"(\d+)\s*동\s*(\d+[A-Za-z가-힣]*)\s*호?\s*$", text, re.IGNORECASE)
     if m:
         return text[:m.start()].strip(), m.group(1), m.group(2)
 
-    # 2. 103동701호 형태
+    # 103동701호 형태
     m = re.search(r"(\d+)\s*동\s*(\d+[A-Za-z가-힣]*)호\s*$", text, re.IGNORECASE)
     if m:
         return text[:m.start()].strip(), m.group(1), m.group(2)
 
-    # 3. 715호 형태
+    # 715호 형태
     m = re.search(r"(\d+[A-Za-z가-힣]*)\s*호\s*$", text, re.IGNORECASE)
     if m:
         return text[:m.start()].strip(), "", m.group(1)
 
-    # 4. 건물명 뒤 숫자 (예: 일성트루엘 715)
+    # 건물명 뒤 숫자 (예: 일성트루엘 715)
     m = re.search(r"\s(\d{2,5})\s*$", text)
     if m:
         return text[:m.start()].strip(), "", m.group(1)
@@ -122,7 +122,7 @@ def search_juso(address):
         return None, f"주소 API 오류: {e}"
 
 # ============================================================
-# 4. 건축물대장 API (전체 수집)
+# 4. 건축물대장 API 호출 (공통)
 # ============================================================
 
 def call_building_api(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
@@ -181,7 +181,7 @@ def call_building_api(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
     return all_items
 
 # ============================================================
-# 5. 전용면적 조회 및 매칭
+# 5. 전용면적 / 연면적 통합 추적 로직 (3단계 Fallback)
 # ============================================================
 
 def find_area_data(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
@@ -190,93 +190,113 @@ def find_area_data(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
 
     expos_items = []
     area_items = []
+    title_items = []
 
-    # 1. 대지구분코드(0:대지, 1:산, 2:블록) 순회
+    # 1. 대지구분코드(0:대지, 1:산, 2:블록) 순회하며 데이터 가져오기
     for platGbCd in ["0", "1", "2"]:
         expos_items = call_building_api("getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
         if expos_items:
             area_items = call_building_api("getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
             break
+        # 표제부 데이터도 병행 수집
+        title_items = call_building_api("getBrTitleInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
 
-    if not expos_items:
-        return None, "건축물대장 전유부 데이터 없음"
+    # ----------------------------------------------------
+    # Case A. 전유부 데이터가 존재하는 경우 (집합건물)
+    # ----------------------------------------------------
+    if expos_items:
+        matched_pks = set()
+        fallback_areas = []
 
-    matched_pks = set()
-    fallback_areas = []
+        for item in expos_items:
+            item_dong_num = extract_numbers(item.get("dongNm", ""))
+            item_ho_num = extract_numbers(item.get("hoNm", ""))
+            pk = str(item.get("mgmBldrgstPk", ""))
 
-    # 2. 전유부에서 세대 매칭
-    for item in expos_items:
-        item_dong_num = extract_numbers(item.get("dongNm", ""))
-        item_ho_num = extract_numbers(item.get("hoNm", ""))
-        pk = str(item.get("mgmBldrgstPk", ""))
-
-        # 동 + 호 모두 입력된 경우
-        if target_dong_num and target_ho_num:
-            if item_dong_num == target_dong_num and item_ho_num == target_ho_num:
-                matched_pks.add(pk)
-                if item.get("area"):
-                    fallback_areas.append(item.get("area"))
-
-        # 호수만 입력된 경우
-        elif target_ho_num:
-            if item_ho_num == target_ho_num:
-                matched_pks.add(pk)
-                if item.get("area"):
-                    fallback_areas.append(item.get("area"))
-
-        # 동/호 모두 미입력된 경우 첫 세대
-        elif not target_dong_num and not target_ho_num:
-            matched_pks.add(pk)
             if item.get("area"):
                 fallback_areas.append(item.get("area"))
-            break
 
-    # 동/호 매칭 실패 시 호수로 재검색
-    if not matched_pks and target_ho_num:
-        for item in expos_items:
-            item_ho_num = extract_numbers(item.get("hoNm", ""))
-            if item_ho_num == target_ho_num:
-                matched_pks.add(str(item.get("mgmBldrgstPk", "")))
-                if item.get("area"):
-                    fallback_areas.append(item.get("area"))
+            if target_dong_num and target_ho_num:
+                if item_dong_num == target_dong_num and item_ho_num == target_ho_num:
+                    matched_pks.add(pk)
+            elif target_ho_num:
+                if item_ho_num == target_ho_num:
+                    matched_pks.add(pk)
+            elif not target_dong_num and not target_ho_num:
+                matched_pks.add(pk)
+                break
 
-    if not matched_pks:
-        return None, "동/호 매칭 실패"
+        # 호수 부분 매칭 재시도
+        if not matched_pks and target_ho_num:
+            for item in expos_items:
+                item_ho_num = extract_numbers(item.get("hoNm", ""))
+                if target_ho_num in item_ho_num or item_ho_num in target_ho_num:
+                    matched_pks.add(str(item.get("mgmBldrgstPk", "")))
 
-    # 3. 전유공용면적 API에서 면적 합산
-    total_area = 0.0
-    found = False
+        # 1-1. 전유공용면적 API 조회
+        if matched_pks and area_items:
+            total_area = 0.0
+            found = False
+            for item in area_items:
+                pk = str(item.get("mgmBldrgstPk", ""))
+                gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
+                gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
 
-    if area_items:
-        for item in area_items:
-            pk = str(item.get("mgmBldrgstPk", ""))
-            gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
-            gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
+                if pk in matched_pks:
+                    if gb_cd == "1" or "전유" in gb_nm:
+                        try:
+                            area = float(str(item.get("area", "0")).replace(",", ""))
+                            total_area += area
+                            found = True
+                        except ValueError:
+                            pass
 
-            if pk in matched_pks:
-                if gb_cd == "1" or "전유" in gb_nm:
-                    try:
-                        area = float(str(item.get("area", "0")).replace(",", ""))
-                        total_area += area
-                        found = True
-                    except ValueError:
-                        pass
+            if found and total_area > 0:
+                return round(total_area, 2), "조회 성공 (전유공용대장)"
 
-    # 4. 전유공용면적 API 데이터 누락 시 전유부 자체 area 사용(Fallback)
-    if not found or total_area <= 0:
+        # 1-2. 전유부 자체 area 필드 사용 (Fallback)
         if fallback_areas:
             try:
-                total_area = float(str(fallback_areas[0]).replace(",", ""))
-                if total_area > 0:
-                    return round(total_area, 2), "조회 성공 (전유부 기준)"
+                area_val = float(str(fallback_areas[0]).replace(",", ""))
+                if area_val > 0:
+                    note = "조회 성공 (전유부 기준)" if matched_pks else "조회 성공 (대표 세대 전유면적)"
+                    return round(area_val, 2), note
             except ValueError:
                 pass
-        return None, "전유면적 자료 없음"
 
-    return round(total_area, 2), "조회 성공"
+    # ----------------------------------------------------
+    # Case B. 전유부가 없거나 실패시 표제부 조회 (단독/상가/통건물)
+    # ----------------------------------------------------
+    if not title_items:
+        for platGbCd in ["0", "1", "2"]:
+            title_items = call_building_api("getBrTitleInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
+            if title_items:
+                break
+
+    if title_items:
+        # 표제부 연면적(totArea) 또는 건축면적(archArea) 가져오기
+        title_item = title_items[0]
+        tot_area = title_item.get("totArea", "0")
+        arch_area = title_item.get("archArea", "0")
+
+        try:
+            val = float(str(tot_area).replace(",", ""))
+            if val > 0:
+                return round(val, 2), "조회 성공 (표제부 연면적 기준)"
+        except ValueError:
+            pass
+
+        try:
+            val = float(str(arch_area).replace(",", ""))
+            if val > 0:
+                return round(val, 2), "조회 성공 (표제부 건축면적 기준)"
+        except ValueError:
+            pass
+
+    return None, "건축물대장 데이터 없음"
 
 # ============================================================
-# 6. 단일 주소 실행
+# 6. 프로세스 실행
 # ============================================================
 
 def process_address(address, progress=None):
@@ -287,14 +307,14 @@ def process_address(address, progress=None):
         base_address, target_dong, target_ho = extract_dong_ho(address)
 
         if progress:
-            progress.write(f"① 주소 검색: {base_address} | 동: '{target_dong}', 호: '{target_ho}'")
+            progress.write(f"① 주소 분석: {base_address} | 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'")
 
         juso, msg = search_juso(base_address)
         if not juso:
             return {"주소": address, "전용면적": "", "상태": msg}
 
         if progress:
-            progress.write("② 건축물대장 데이터 조회 중...")
+            progress.write("② 건축물대장 데이터 검색 중...")
 
         area, status = find_area_data(
             juso["sigunguCd"],
@@ -318,7 +338,7 @@ def process_address(address, progress=None):
 # ============================================================
 
 st.title("🏠 건축물 전용면적 조회")
-st.write("주소를 입력하면 건축물대장 기준 전용면적을 조회합니다.")
+st.write("주소를 입력하면 전유면적(아파트/오피스텔) 또는 표제부 면적(단독/상가)을 자동으로 추적하여 조회합니다.")
 
 addresses = []
 for i in range(10):
