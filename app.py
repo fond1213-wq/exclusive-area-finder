@@ -395,6 +395,137 @@ def get_area_info(
     bun,
     ji
 ):
+    """
+    전유공용면적 조회
+    - API 오류 내용을 숨기지 않고 확인
+    """
+
+    url = (
+        BUILDING_API_BASE
+        + "/getBrExposPubuseAreaInfo"
+    )
+
+    all_items = []
+
+    page_no = 1
+    num_rows = 100
+
+    while True:
+
+        params = {
+            "serviceKey": BUILDING_API_KEY,
+            "sigunguCd": str(sigunguCd),
+            "bjdongCd": str(bjdongCd),
+            "platGbCd": str(platGbCd),
+            "bun": str(bun).zfill(4),
+            "ji": str(ji).zfill(4),
+            "pageNo": page_no,
+            "numOfRows": num_rows,
+            "_type": "json"
+        }
+
+        try:
+
+            response = requests.get(
+                url,
+                params=params,
+                timeout=30
+            )
+
+            print("전유공용면적 HTTP 상태:", response.status_code)
+
+            response.raise_for_status()
+
+            # JSON 변환
+            data = response.json()
+
+            # API 응답 확인
+            response_data = data.get("response", {})
+            header = response_data.get("header", {})
+            body = response_data.get("body", {})
+
+            result_code = header.get("resultCode", "")
+            result_msg = header.get("resultMsg", "")
+
+            print(
+                "전유공용면적 API:",
+                result_code,
+                result_msg
+            )
+
+            if result_code not in ("00", "0", ""):
+
+                print("전유공용면적 API 오류:")
+                print(data)
+
+                return []
+
+            total_count = int(
+                body.get("totalCount", 0)
+            )
+
+            items = (
+                body
+                .get("items", {})
+                .get("item", [])
+            )
+
+            if isinstance(items, dict):
+                items = [items]
+
+            if items:
+                all_items.extend(items)
+
+            print(
+                "전유공용면적 자료:",
+                len(items),
+                "건 / 전체",
+                total_count
+            )
+
+            if not items:
+                break
+
+            if len(all_items) >= total_count:
+                break
+
+            page_no += 1
+
+        except requests.exceptions.RequestException as e:
+
+            print(
+                "전유공용면적 HTTP 오류:",
+                repr(e)
+            )
+
+            try:
+                print(
+                    "서버 응답:",
+                    response.text[:2000]
+                )
+            except:
+                pass
+
+            break
+
+        except Exception as e:
+
+            print(
+                "전유공용면적 처리 오류:",
+                repr(e)
+            )
+
+            try:
+                print(
+                    "원본 응답:",
+                    response.text[:2000]
+                )
+            except:
+                pass
+
+            break
+
+    return all_items
 
     url = (
         BUILDING_API_BASE
@@ -792,6 +923,8 @@ def process_address(address, progress=None):
             }
 
 
+
+        
         if progress:
 
             progress.write(
@@ -818,14 +951,14 @@ def process_address(address, progress=None):
             juso["ji"]
         )
 
-
         if not area_items:
 
             return {
                 "주소": address,
                 "전용면적": "",
-                "상태": "전유공용면적 없음"
+                "상태": "전유공용면적 조회 실패 - 로그 확인"
             }
+        
 
 
         area, status, pk = find_exclusive_area(
