@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 # ============================================================
-# 1. 기본 설정
+# 1. 기본 설정 및 API Key
 # ============================================================
 
 st.set_page_config(
@@ -19,7 +19,7 @@ BUILDING_API_BASE = "https://apis.data.go.kr/1613000/BldRgstHubService"
 JUSO_API_URL = "https://business.juso.go.kr/addrlink/addrLinkApi.do"
 
 if "BUILDING_API_KEY" not in st.secrets or "JUSO_API_KEY" not in st.secrets:
-    st.error("⚠️ Streamlit Secrets 설정이 필요합니다.")
+    st.error("⚠️ Streamlit Secrets 설정이 필요합니다. Settings -> Secrets에서 BUILDING_API_KEY와 JUSO_API_KEY를 설정해주세요.")
     st.stop()
 
 BUILDING_API_KEY = st.secrets["BUILDING_API_KEY"]
@@ -27,13 +27,12 @@ JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 BUILDING_API_KEY_UNQUOTED = urllib.parse.unquote(BUILDING_API_KEY)
 
 # ============================================================
-# 2. 정규화 함수 (숫자만 추출하여 강력한 비교)
+# 2. 동 / 호 추출 및 숫자가공
 # ============================================================
 
 def extract_numbers(value):
     if not value:
         return ""
-    # "103동" -> "103", "제103동" -> "103", "0103" -> "103"
     nums = re.findall(r"\d+", str(value))
     if nums:
         return str(int(nums[0]))
@@ -44,36 +43,28 @@ def extract_dong_ho(address):
     dong = ""
     ho = ""
 
-    # 동, 호 추출 정규식
+    # 동, 호 패턴 (예: 103동 701호, 103동701호, 129-2103)
     m = re.search(r"(\d+)\s*동\s*(\d+[A-Za-z가-힣]*)\s*호?\s*$", text, re.IGNORECASE)
     if m:
-        dong = m.group(1)
-        ho = m.group(2)
-        text = text[:m.start()].strip()
-        return text, dong, ho
+        return text[:m.start()].strip(), m.group(1), m.group(2)
 
     m = re.search(r"(\d+)\s*동\s*(\d+[A-Za-z가-힣]*)호\s*$", text, re.IGNORECASE)
     if m:
-        dong = m.group(1)
-        ho = m.group(2)
-        text = text[:m.start()].strip()
-        return text, dong, ho
+        return text[:m.start()].strip(), m.group(1), m.group(2)
 
     m = re.search(r"(\d+[A-Za-z가-힣]*)\s*호\s*$", text, re.IGNORECASE)
     if m:
-        ho = m.group(1)
-        text = text[:m.start()].strip()
-        return text, "", ho
+        return text[:m.start()].strip(), "", m.group(1)
 
+    # 띄어쓰기 후 숫자 형태 (예: 일성트루엘 715)
     m = re.search(r"\s(\d{2,5})\s*$", text)
     if m:
-        ho = m.group(1)
-        text = text[:m.start()].strip()
+        return text[:m.start()].strip(), "", m.group(1)
 
     return text, dong, ho
 
 # ============================================================
-# 3. Juso API
+# 3. Juso API (도로명 주소 검색)
 # ============================================================
 
 def search_juso(address):
@@ -131,20 +122,20 @@ def search_juso(address):
         return None, f"주소 API 오류: {e}"
 
 # ============================================================
-# 4. 건축물대장 API 호출 (전체 페이지 수집)
+# 4. 건축물대장 API (다중 페이지 데이터 수집)
 # ============================================================
 
 def call_building_api_all_pages(endpoint, params):
     all_items = []
     page = 1
-    max_pages = 5  # 최대 5,000건 수집 (대단지 대응)
+    max_pages = 5
 
     while page <= max_pages:
         params["pageNo"] = page
         params["numOfRows"] = 1000
         params["_type"] = "json"
         
-        # Key 시도
+        # Decoding Key 시도 후 Encoding Key 시도
         params["serviceKey"] = BUILDING_API_KEY_UNQUOTED
         try:
             res = requests.get(f"{BUILDING_API_BASE}/{endpoint}", params=params, timeout=10)
@@ -178,57 +169,94 @@ def call_building_api_all_pages(endpoint, params):
     return all_items
 
 # ============================================================
-# 5. 전용면적 계산 매칭 로직
+# 5. 전용면적 계산 (유연한 매칭 및 Fallback 로직)
 # ============================================================
 
 def find_exclusive_area(expos_items, area_items, target_dong, target_ho):
     target_dong_num = extract_numbers(target_dong)
     target_ho_num = extract_numbers(target_ho)
 
-    # 1. 전유부에서 해당 세대의 mgmBldrgstPk 추출
     matched_pks = set()
+    fallback_area = None
+
+    # ----------------------------------------------------
+    # 1. 전유부(expos_items)에서 매칭 세대 탐색
+    # ----------------------------------------------------
     for item in expos_items:
         item_dong_num = extract_numbers(item.get("dongNm", ""))
         item_ho_num = extract_numbers(item.get("hoNm", ""))
-
-        # 동이 지정된 경우 동/호 모두 일치해야 함
+        
+        # 1-1. 동과 호가 모두 일치하는 경우
         if target_dong_num and target_ho_num:
             if item_dong_num == target_dong_num and item_ho_num == target_ho_num:
                 matched_pks.add(str(item.get("mgmBldrgstPk", "")))
-        # 동이 입력되지 않은 경우 호수만 일치
+                if "area" in item and item["area"]:
+                    fallback_area = item["area"]
+
+        # 1-2. 호수만 일치하는 경우 (동 정보 미입력 또는 단일동 건물)
         elif target_ho_num:
             if item_ho_num == target_ho_num:
                 matched_pks.add(str(item.get("mgmBldrgstPk", "")))
+                if "area" in item and item["area"]:
+                    fallback_area = item["area"]
+
+    # 1-3. 동/호수가 미입력된 경우 첫 번째 전유 세대 매칭
+    if not target_dong_num and not target_ho_num and expos_items:
+        matched_pks.add(str(expos_items[0].get("mgmBldrgstPk", "")))
+        if "area" in expos_items[0] and expos_items[0]["area"]:
+            fallback_area = expos_items[0]["area"]
+
+    # 동/호 매칭 실패 시 첫 세대 강제 매칭 방지 대신 호수 유연 검색
+    if not matched_pks and target_ho_num:
+        for item in expos_items:
+            item_ho_num = extract_numbers(item.get("hoNm", ""))
+            if item_ho_num == target_ho_num:
+                matched_pks.add(str(item.get("mgmBldrgstPk", "")))
+                if "area" in item and item["area"]:
+                    fallback_area = item["area"]
 
     if not matched_pks:
-        return None, "동/호 매칭 실패 (전유부)"
+        return None, "동/호 매칭 실패 (건축물대장 전유부)"
 
-    # 2. PK 기반으로 전유공용면적 항목 추출 및 전용면적 합산
+    # ----------------------------------------------------
+    # 2. 전유공용면적(area_items)에서 전용면적 합산
+    # ----------------------------------------------------
     total_area = 0.0
     found = False
 
-    for item in area_items:
-        item_pk = str(item.get("mgmBldrgstPk", ""))
-        gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
-        gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
+    if area_items:
+        for item in area_items:
+            item_pk = str(item.get("mgmBldrgstPk", ""))
+            gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
+            gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
 
-        if item_pk in matched_pks:
-            # 전유 부분만 합산
-            if gb_cd == "1" or "전유" in gb_nm:
-                try:
-                    area = float(str(item.get("area", "0")).replace(",", ""))
-                    total_area += area
-                    found = True
-                except ValueError:
-                    pass
+            if item_pk in matched_pks:
+                # 전유 부분만 추출
+                if gb_cd == "1" or "전유" in gb_nm:
+                    try:
+                        area = float(str(item.get("area", "0")).replace(",", ""))
+                        total_area += area
+                        found = True
+                    except ValueError:
+                        pass
 
+    # ----------------------------------------------------
+    # 3. 전유공용면적 데이터가 없을 경우 전유부 대장 area로 대체(Fallback)
+    # ----------------------------------------------------
     if not found or total_area <= 0:
+        if fallback_area:
+            try:
+                total_area = float(str(fallback_area).replace(",", ""))
+                if total_area > 0:
+                    return round(total_area, 2), "정상 (전유부 면적 적용)"
+            except ValueError:
+                pass
         return None, "전유면적 자료 없음"
 
     return round(total_area, 2), "정상"
 
 # ============================================================
-# 6. 프로세스 실행
+# 6. 메인 프로세스
 # ============================================================
 
 def process_address(address, progress=None):
@@ -239,7 +267,7 @@ def process_address(address, progress=None):
         base_address, target_dong, target_ho = extract_dong_ho(address)
 
         if progress:
-            progress.write(f"① 주소 검색: {base_address}")
+            progress.write(f"① 주소 검색: {base_address} (동: {target_dong or '미입력'}, 호: {target_ho or '미입력'})")
 
         juso, msg = search_juso(base_address)
         if not juso:
@@ -257,8 +285,9 @@ def process_address(address, progress=None):
         }
 
         expos_items = call_building_api_all_pages("getBrExposInfo", params)
+        
+        # 산번지 재시도
         if not expos_items:
-            # 산번지 재시도
             params["platGbCd"] = "1"
             expos_items = call_building_api_all_pages("getBrExposInfo", params)
 
@@ -269,8 +298,6 @@ def process_address(address, progress=None):
             progress.write("③ 전유공용면적 데이터 조회 중...")
 
         area_items = call_building_api_all_pages("getBrExposPubuseAreaInfo", params)
-        if not area_items:
-            return {"주소": address, "전용면적": "", "상태": "전유공용면적 데이터 없음"}
 
         area, status = find_exclusive_area(expos_items, area_items, target_dong, target_ho)
 
@@ -287,7 +314,7 @@ def process_address(address, progress=None):
 # ============================================================
 
 st.title("🏠 건축물 전용면적 조회")
-st.write("주소를 입력하면 건축물대장 기준 전용면적을 조회합니다.")
+st.write("주소를 입력하면 건축물대장 기준 전용면적을 조회합니다. (동/호수가 없어도 조회 가능)")
 
 addresses = []
 for i in range(10):
@@ -316,7 +343,7 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         results.append(result)
 
         if result["전용면적"]:
-            st.success(f"전용면적: {result['전용면적']}")
+            st.success(f"전용면적: {result['전용면적']} ({result['상태']})")
         else:
             st.error(f"조회 실패: {result['상태']}")
 
