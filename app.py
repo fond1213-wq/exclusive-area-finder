@@ -162,6 +162,41 @@ def search_juso(address):
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
 # ============================================================
+# 3-1. 도로명주소 검색 (건물명/일부주소 → 후보 목록)
+# ============================================================
+def search_address_candidates(keyword, count=20):
+    """키워드로 Juso 검색 후 후보 리스트 반환"""
+    params = {
+        "confmKey": JUSO_API_KEY,
+        "currentPage": 1,
+        "countPerPage": str(count),
+        "keyword": keyword,
+        "resultType": "json",
+        "addInfoYn": "Y",
+    }
+    try:
+        res = requests.get(JUSO_API_URL, params=params, timeout=10)
+        data = res.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        return [], f"요청 실패: {e}"
+
+    common = data.get("results", {}).get("common", {})
+    if common.get("errorCode", "") not in ("", "0"):
+        return [], f"API 오류 [{common.get('errorCode')}] {common.get('errorMessage','')}"
+
+    juso_list = data.get("results", {}).get("juso", [])
+    results = []
+    for j in juso_list:
+        results.append({
+            "도로명주소": j.get("roadAddr", ""),
+            "지번주소": j.get("jibunAddr", ""),
+            "건물명": j.get("bdNm", ""),
+            "우편번호": j.get("zipNo", ""),
+            "동목록": j.get("detBdNmList", ""),
+        })
+    return results, None
+
+# ============================================================
 # 4. 국토부 API 호출
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
@@ -471,6 +506,65 @@ def process_address(address, progress=None):
 # 7. UI
 # ============================================================
 st.title("🏠 건축물 전용면적 조회")
+
+# ---------- 🔍 도로명주소 검색 (보조 도구) ----------
+with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
+    st.caption("건물명(예: 동아아파트) 또는 주소 일부(예: 신반포로33길)를 입력하세요.")
+
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        search_kw = st.text_input(
+            "검색어",
+            key="juso_search_kw",
+            placeholder="예: 동아아파트 / 신반포로33길 / 잠원동 157",
+            label_visibility="collapsed"
+        )
+    with col2:
+        do_search = st.button("🔍 검색", use_container_width=True)
+
+    if do_search:
+        if not search_kw.strip():
+            st.warning("검색어를 입력해주세요.")
+        else:
+            with st.spinner("검색 중..."):
+                candidates, err = search_address_candidates(search_kw.strip(), count=20)
+            if err:
+                st.error(f"검색 실패: {err}")
+            elif not candidates:
+                st.info("검색 결과가 없습니다.")
+            else:
+                st.success(f"총 {len(candidates)}건 검색됨")
+
+                # 결과를 어느 주소창에 넣을지 선택
+                target_slot = st.selectbox(
+                    "⬆️ 이 주소를 넣을 위치",
+                    options=list(range(1, 11)),
+                    format_func=lambda x: f"주소 {x}",
+                    key="target_slot"
+                )
+
+                for i, c in enumerate(candidates, start=1):
+                    with st.container(border=True):
+                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                        if c["건물명"]:
+                            st.caption(f"🏢 건물명: {c['건물명']}")
+                        if c["지번주소"]:
+                            st.caption(f"📍 지번: {c['지번주소']}")
+                        if c["동목록"]:
+                            dong_preview = c["동목록"]
+                            if len(dong_preview) > 200:
+                                dong_preview = dong_preview[:200] + "..."
+                            st.caption(f"🏠 동목록: {dong_preview}")
+
+                        if st.button(f"⬆️ 주소 {target_slot}에 넣기", key=f"use_{i}"):
+                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
+                            st.success(f"주소 {target_slot}에 입력했습니다. 아래 조회창에서 확인하세요.")
+                            st.rerun()
+
+st.markdown("---")
+
+# ---------- 기존 전용면적 조회 ----------
+st.subheader("📋 전용면적 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 000동 000호)")
 
 addresses = []
@@ -520,4 +614,4 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         file_name="전용면적_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-        )
+                )
