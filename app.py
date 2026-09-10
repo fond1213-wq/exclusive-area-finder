@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 # ============================================================
-# 1. 기본 설정 및 API Key (Colab 방식 규격화)
+# 1. 기본 설정 및 API Key (Colab 호환)
 # ============================================================
 
 st.set_page_config(
@@ -22,13 +22,12 @@ if "BUILDING_API_KEY" not in st.secrets or "JUSO_API_KEY" not in st.secrets:
     st.error("⚠️ Streamlit Secrets 설정이 필요합니다.")
     st.stop()
 
-# Colab에서 작동하는 핵심: URL 디코딩된 키 생성
 BUILDING_API_KEY_RAW = st.secrets["BUILDING_API_KEY"]
 BUILDING_API_KEY_DECODED = urllib.parse.unquote(BUILDING_API_KEY_RAW)
 JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
 # ============================================================
-# 2. 주소에서 동 / 호수 파싱
+# 2. 숫자 추출 및 동/호수 파싱 함수
 # ============================================================
 
 def clean_num(val):
@@ -37,38 +36,41 @@ def clean_num(val):
     nums = re.findall(r"\d+", str(val))
     return str(int(nums[0])) if nums else ""
 
-def parse_address_dong_ho(address):
+def extract_dong_ho(address):
     text = str(address).strip()
+    
+    dong = ""
+    ho = ""
 
-    # 1. 129동 2103호 / 129동2103호
-    m = re.search(r"(\d+)\s*동\s*(\d+)\s*호?", text)
-    if m:
-        return text[:m.start()].strip(), m.group(1), m.group(2)
+    # 1. 동/호 명시 형태 (예: 129동 2103호 / 129동 2103)
+    m_dong = re.search(r"(\d+)\s*동", text)
+    if m_dong:
+        dong = m_dong.group(1)
 
-    # 2. 129-2103 형태
-    m = re.search(r"(\d{2,3})-(\d{3,4})\b", text)
-    if m:
-        return text[:m.start()].strip(), m.group(1), m.group(2)
+    m_ho = re.search(r"(\d+)\s*호", text)
+    if m_ho:
+        ho = m_ho.group(1)
 
-    # 3. 715호 (호수만 있는 경우)
-    m = re.search(r"(\d+)\s*호\b", text)
-    if m:
-        return text[:m.start()].strip(), "", m.group(1)
+    # 2. 동/호 단어가 없는 경우 (예: 129-2103)
+    if not dong and not ho:
+        m_dash = re.search(r"(\d{2,3})-(\d{3,4})\b", text)
+        if m_dash:
+            dong = m_dash.group(1)
+            ho = m_dash.group(2)
 
-    # 4. 단순 연속 숫자 (예: 왕십리로 410 129 2103)
-    m = re.search(r"\s(\d{2,3})\s+(\d{3,4})\b", text)
-    if m:
-        return text[:m.start()].strip(), m.group(1), m.group(2)
+    # 3. 공백 구분 뒤쪽 숫자 2개 (예: 왕십리로 410 129 2103)
+    if not dong and not ho:
+        nums = re.findall(r"\b\d+\b", text)
+        if len(nums) >= 3: # 도로명 번호 외에 동, 호가 포함된 경우
+            dong = nums[-2]
+            ho = nums[-1]
+        elif len(nums) == 2:
+            ho = nums[-1]
 
-    # 5. 단순 단일 숫자 (예: 신림로23길 16 715)
-    m = re.search(r"\s(\d{3,4})\b", text)
-    if m:
-        return text[:m.start()].strip(), "", m.group(1)
-
-    return text, "", ""
+    return dong, ho
 
 # ============================================================
-# 3. Juso API (법정동코드 및 지번 추출)
+# 3. Juso API (입력 주소 원본 그대로 검색 - Colab 방식)
 # ============================================================
 
 def search_juso(address):
@@ -97,6 +99,7 @@ def search_juso(address):
         bjdongCd = admCd[5:10]
         jibunAddr = j.get("jibunAddr", "")
 
+        # 본번, 부번 추출
         jibun_match = re.search(r"\s(\d+)(?:-(\d+))?(?:\s|$)", jibunAddr)
         if jibun_match:
             bun = jibun_match.group(1)
@@ -118,13 +121,12 @@ def search_juso(address):
         return None, f"주소 API 오류: {e}"
 
 # ============================================================
-# 4. 국토부 건축물대장 API 호출 (Colab 호환)
+# 4. 국토부 건축물대장 API 호출 (Colab 규격)
 # ============================================================
 
 def call_api(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
     url = f"{BUILDING_API_BASE}/{endpoint}"
     
-    # 국토부 API 규격: 번/지는 반드시 4자리 문자열이어야 함
     bun_str = str(bun).zfill(4)
     ji_str = str(ji).zfill(4)
 
@@ -155,7 +157,7 @@ def call_api(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
         return []
 
 # ============================================================
-# 5. 전용면적 매칭 로직
+# 5. 전용면적 매칭 (Colab 호환)
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
@@ -163,14 +165,14 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
     t_ho_num = clean_num(target_ho)
 
     for platGbCd in ["0", "1", "2"]:
-        # 1. 전유부 표제부 정보 (getBrExposInfo)
+        # 1. getBrExposInfo (표제부/전유부 기본목록)
         expos_list = call_api("getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
         if not expos_list:
             continue
 
         matched_pk = None
 
-        # 동/호수 매칭
+        # 동 + 호 매칭
         for item in expos_list:
             i_dong = clean_num(item.get("dongNm", ""))
             i_ho = clean_num(item.get("hoNm", ""))
@@ -184,7 +186,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
                     matched_pk = item.get("mgmBldrgstPk")
                     break
 
-        # 동 매칭 실패 시 호수만 재시도
+        # 호수만 재시도
         if not matched_pk and t_ho_num:
             for item in expos_list:
                 i_ho = clean_num(item.get("hoNm", ""))
@@ -192,15 +194,18 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
                     matched_pk = item.get("mgmBldrgstPk")
                     break
 
+        # 동/호수가 둘 다 없는 경우 첫 항목
+        if not matched_pk and not t_ho_num:
+            matched_pk = expos_list[0].get("mgmBldrgstPk")
+
         if matched_pk:
-            # 2. 전유공용면적 정보 (getBrExposPubuseAreaInfo)
+            # 2. getBrExposPubuseAreaInfo (전유공용면적 - exposPubuseGbCd == '1')
             area_list = call_api("getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, ji)
             total_area = 0.0
             found = False
 
             for a in area_list:
                 if str(a.get("mgmBldrgstPk", "")) == str(matched_pk):
-                    # exposPubuseGbCd == '1' (전유부분)
                     gb_cd = str(a.get("exposPubuseGbCd", "")).strip()
                     gb_nm = str(a.get("exposPubuseGbCdNm", "")).strip()
 
@@ -217,25 +222,25 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
     return None, "동/호 전유면적 매칭 실패"
 
 # ============================================================
-# 6. 메인 프로세스
+# 6. 프로세스 실행
 # ============================================================
 
 def process_address(address, progress=None):
     if not address:
         return {"주소": "", "전용면적": "", "상태": "주소 없음"}
 
-    base_address, target_dong, target_ho = parse_address_dong_ho(address)
-
-    if progress:
-        progress.write(f"① 주소 분석: '{base_address}' | 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'")
-
-    juso, msg = search_juso(base_address)
+    # 1. 입력 주소 원본 전체로 도로명 주소 API 검색 (Colab 방식)
+    juso, msg = search_juso(address)
     if not juso:
         return {"주소": address, "전용면적": "", "상태": msg}
 
-    if progress:
-        progress.write(f"② 건축물대장 조회 중 (시군구: {juso['sigunguCd']}, 지번: {juso['bun']}-{juso['ji']})...")
+    # 2. 주소에서 동/호수 숫자를 별도 파싱
+    target_dong, target_ho = extract_dong_ho(address)
 
+    if progress:
+        progress.write(f"① 지번 확인: {juso['jibunAddr']} (법정동: {juso['sigunguCd']}{juso['bjdongCd']}, 지번: {juso['bun']}-{juso['ji']}) | 인식된 동: '{target_dong}', 호: '{target_ho}'")
+
+    # 3. 건축물대장 API 조회 및 면적 계산
     area, status = find_dedicated_area(
         juso["sigunguCd"],
         juso["bjdongCd"],
