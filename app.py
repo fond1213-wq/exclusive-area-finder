@@ -27,7 +27,7 @@ BUILDING_API_KEY_DECODED = urllib.parse.unquote(BUILDING_API_KEY_RAW)
 JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
 # ============================================================
-# 2. 파싱 및 정규화 함수
+# 2. 숫자 추출 및 정교한 동/호수 파싱
 # ============================================================
 
 def clean_num(val):
@@ -40,43 +40,50 @@ def extract_dong_ho(address):
     text = str(address).strip()
     dong, ho = "", ""
 
-    # 1. 동/호 명시 (예: 129동 2103호 / 129동 2103)
+    # 1. '숫자+동' 우선 추출 (예: 103동, 129동)
     m_dong = re.search(r"(\d+)\s*동", text)
     if m_dong:
         dong = m_dong.group(1)
 
+    # 2. '숫자+호' 우선 추출 (예: 701호, 2103호)
     m_ho = re.search(r"(\d+)\s*호", text)
     if m_ho:
         ho = m_ho.group(1)
 
-    # 2. 동-호 형태 (예: 129-2103)
+    # 3. '동/호' 단어가 없을 때 (예: 129-2103 또는 끝자리의 3~4자리 숫자)
     if not dong and not ho:
         m_dash = re.search(r"(\d{2,4})-(\d{3,4})\b", text)
         if m_dash:
             dong = m_dash.group(1)
             ho = m_dash.group(2)
 
-    # 3. 공백 구분 뒤쪽 숫자들
-    if not dong and not ho:
-        nums = re.findall(r"\b\d+\b", text)
-        if len(nums) >= 3:
-            dong = nums[-2]
-            ho = nums[-1]
-        elif len(nums) == 2:
-            ho = nums[-1]
+    # 4. 동은 없지만 끝에 호수 숫자가 독립해 있는 경우 (예: 일성트루엘 715)
+    if not ho:
+        tokens = text.split()
+        if tokens:
+            last_token = tokens[-1]
+            if last_token.isdigit() and len(last_token) >= 3:
+                ho = last_token
 
     return dong, ho
 
-def sanitize_base_address(address):
-    """동/호수 및 상세주소를 제거하고 도로명+건물번호만 남김"""
+def sanitize_address_for_juso(address):
+    """도로명주소 API 검색용 주소 정제"""
     text = str(address).strip()
+    # '동', '호', '아파트' 및 뒤쪽 임의의 건물 상세 명칭 제거
     text = re.sub(r"\d+\s*동.*", "", text)
-    text = re.sub(r"\d+-\d+.*", "", text)
     text = re.sub(r"\d+\s*호.*", "", text)
+    text = re.sub(r"\d+-\d+.*", "", text)
+    
+    # 대표적인 도로명 주소 패턴(도로명 + 건물번호)만 골라냄
+    m = re.search(r"^([가-힣\s]+(?:로|길|대로)\s*\d+(?:-\d+)?)", text)
+    if m:
+        return m.group(1).strip()
+    
     return text.strip()
 
 # ============================================================
-# 3. Juso API (2단계 폴백 검색)
+# 3. Juso API (멀티 단계 검색)
 # ============================================================
 
 def search_juso_single(keyword):
@@ -120,17 +127,16 @@ def search_juso_single(keyword):
     return None
 
 def search_juso(address):
-    # 1차: 원본 주소 전체 검색
+    # 1차: 주소 정제 후 도로명+건물번호 검색 (가장 정확함)
+    clean_addr = sanitize_address_for_juso(address)
+    res = search_juso_single(clean_addr)
+    if res:
+        return res, "정상"
+
+    # 2차: 실패 시 원본 전체 주소로 재시도
     res = search_juso_single(address)
     if res:
-        return res, "정상 (1차 원문검색)"
-
-    # 2차: 동/호수 제거 후 기본 도로명주소로 검색
-    clean_addr = sanitize_base_address(address)
-    if clean_addr and clean_addr != address:
-        res = search_juso_single(clean_addr)
-        if res:
-            return res, "정상 (2차 기본주소 정제검색)"
+        return res, "정상"
 
     return None, "도로명주소 검색 결과 없음"
 
@@ -171,7 +177,7 @@ def call_api(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
         return []
 
 # ============================================================
-# 5. 전용면적 정밀 매칭 엔진
+# 5. 전용면적 정밀 매칭 엔진 (다중 폴백 및 정규화)
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
@@ -185,63 +191,53 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
 
     for current_ji in ji_variants:
         for platGbCd in ["0", "1", "2"]:
-            # 1. 표제부/전유부 기본목록 (getBrExposInfo)
-            expos_list = call_api("getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
-            if not expos_list:
-                continue
-
-            matched_pk = None
-
-            # 동 + 호 정규화 매칭
-            for item in expos_list:
-                i_dong = clean_num(item.get("dongNm", ""))
-                i_ho = clean_num(item.get("hoNm", ""))
-
-                if t_dong_num and t_ho_num:
-                    if i_dong == t_dong_num and i_ho == t_ho_num:
-                        matched_pk = item.get("mgmBldrgstPk")
-                        break
-                elif t_ho_num:
-                    if i_ho == t_ho_num:
-                        matched_pk = item.get("mgmBldrgstPk")
-                        break
-
-            # 동 매칭 실패 시 호수만 재시도
-            if not matched_pk and t_ho_num:
-                for item in expos_list:
-                    i_ho = clean_num(item.get("hoNm", ""))
-                    if i_ho == t_ho_num:
-                        matched_pk = item.get("mgmBldrgstPk")
-                        break
-
-            # 동/호 입력이 없었던 경우 첫 항목
-            if not matched_pk and not t_dong_num and not t_ho_num:
-                matched_pk = expos_list[0].get("mgmBldrgstPk")
-
-            if matched_pk:
-                # 2. 전유공용면적 정보 (getBrExposPubuseAreaInfo)
-                area_list = call_api("getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
-                total_area = 0.0
-                found = False
-
+            # 1. 전유공용면적 대장 직접 조회 (getBrExposPubuseAreaInfo)
+            area_list = call_api("getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
+            
+            if area_list:
+                # 동+호 또는 호수 매칭
                 for a in area_list:
-                    if str(a.get("mgmBldrgstPk", "")) == str(matched_pk):
-                        gb_cd = str(a.get("exposPubuseGbCd", "")).strip()
-                        gb_nm = str(a.get("exposPubuseGbCdNm", "")).strip()
+                    i_dong = clean_num(a.get("dongNm", ""))
+                    i_ho = clean_num(a.get("hoNm", ""))
+                    gb_cd = str(a.get("exposPubuseGbCd", "")).strip()
+                    gb_nm = str(a.get("exposPubuseGbCdNm", "")).strip()
 
-                        if gb_cd == "1" or "전유" in gb_nm:
+                    is_dedicated = (gb_cd == "1" or "전유" in gb_nm)
+
+                    if is_dedicated:
+                        # 동, 호 모두 일치
+                        if t_dong_num and t_ho_num:
+                            if i_dong == t_dong_num and i_ho == t_ho_num:
+                                try:
+                                    val = float(str(a.get("area", "0")).replace(",", ""))
+                                    if val > 0:
+                                        return round(val, 2), "조회 성공"
+                                except ValueError:
+                                    pass
+                        # 호수만 일치
+                        elif t_ho_num and i_ho == t_ho_num:
                             try:
-                                total_area += float(str(a.get("area", "0")).replace(",", ""))
-                                found = True
+                                val = float(str(a.get("area", "0")).replace(",", ""))
+                                if val > 0:
+                                    return round(val, 2), "조회 성공"
                             except ValueError:
                                 pass
 
-                if found and total_area > 0:
-                    return round(total_area, 2), "조회 성공 (전용면적)"
-
-                # 전유공용대장 조회가 안 될 경우 전유부 area 직접 사용
+            # 2. 전유부 기본 목록 조회 (getBrExposInfo) - 보완
+            expos_list = call_api("getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
+            if expos_list:
                 for item in expos_list:
-                    if str(item.get("mgmBldrgstPk", "")) == str(matched_pk):
+                    i_dong = clean_num(item.get("dongNm", ""))
+                    i_ho = clean_num(item.get("hoNm", ""))
+
+                    matched = False
+                    if t_dong_num and t_ho_num:
+                        if i_dong == t_dong_num and i_ho == t_ho_num:
+                            matched = True
+                    elif t_ho_num and i_ho == t_ho_num:
+                        matched = True
+
+                    if matched:
                         try:
                             val = float(str(item.get("area", "0")).replace(",", ""))
                             if val > 0:
@@ -259,13 +255,13 @@ def process_address(address, progress=None):
     if not address:
         return {"주소": "", "전용면적": "", "상태": "주소 없음"}
 
-    # 1. 2단계 주소 검색
+    # 1. 동/호수 파싱 (주소 정제 전에 먼저 실행)
+    target_dong, target_ho = extract_dong_ho(address)
+
+    # 2. 도로명 주소 API 검색
     juso, msg = search_juso(address)
     if not juso:
         return {"주소": address, "전용면적": "", "상태": msg}
-
-    # 2. 입력값에서 동/호수 파싱
-    target_dong, target_ho = extract_dong_ho(address)
 
     if progress:
         progress.write(f"① 지번 확인: {juso['jibunAddr']} (법정동: {juso['sigunguCd']}{juso['bjdongCd']}, 지번: {juso['bun']}-{juso['ji']}) | 인식된 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'")
@@ -297,7 +293,7 @@ for i in range(10):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울특별시 성동구 왕십리로 410 129동 2103호"
+        placeholder="예: 서울특별시 성동구 왕십리로410 129동 2103호"
     )
     addresses.append(address.strip())
 
