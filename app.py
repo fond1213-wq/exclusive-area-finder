@@ -878,7 +878,19 @@ def process_address(address, progress=None):
             juso["bun"],
             juso["ji"],
         )
-        
+        st.write("전유공용면적 API 반환 건수:", len(area_items))
+
+        st.json([
+           {
+            "dongNm": x.get("dongNm"),
+            "hoNm": x.get("hoNm"),
+            "exposPubuseGbCd": x.get("exposPubuseGbCd"),
+            "exposPubuseGbCdNm": x.get("exposPubuseGbCdNm"),
+            "area": x.get("area"),
+            "mgmBldrgstPk": x.get("mgmBldrgstPk")
+           }
+           for x in area_items[:20]
+        ])
 
 
         
