@@ -471,14 +471,14 @@ def process_address(address, progress=None):
 # 7. UI
 # ============================================================
 st.title("🏠 건축물 전용면적 조회")
-st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 103동 701호)")
+st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 000동 000호)")
 
 addresses = []
 for i in range(10):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 103동 701호"
+        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 000동 000호"
     )
     addresses.append(address.strip())
 
