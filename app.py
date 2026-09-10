@@ -381,7 +381,7 @@ st.caption("💡 **'OO동 OOOO호'** 형식 권장.")
 addresses = []
 for i in range(10):
     address = st.text_input(f"주소 {i+1}", key=f"address_{i}",
-        placeholder="예: 서울시 서초구 나루터로4길 70-5 1502호")
+        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 OOO동 OOOO호")
     addresses.append(address.strip())
 
 if st.button("🔎 전용면적 조회", type="primary", use_container_width=True):
