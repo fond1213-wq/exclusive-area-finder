@@ -392,55 +392,67 @@ def get_area_info(sigunguCd, bjdongCd, platGbCd, bun, ji):
 
     url = BUILDING_API_BASE + "/getBrExposPubuseAreaInfo"
 
-    params = {
-        "serviceKey": BUILDING_API_KEY,
-        "sigunguCd": str(sigunguCd),
-        "bjdongCd": str(bjdongCd),
-        "platGbCd": str(platGbCd),
-        "bun": str(bun).zfill(4),
-        "ji": str(ji).zfill(4),
-        "pageNo": 1,
-        "numOfRows": 100,
-        "_type": "json"
-    }
+    all_items = []
 
-    try:
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10
-        )
+    for page in range(1, 11):
 
-        response.raise_for_status()
+        params = {
+            "serviceKey": BUILDING_API_KEY,
+            "sigunguCd": str(sigunguCd),
+            "bjdongCd": str(bjdongCd),
+            "platGbCd": str(platGbCd),
+            "bun": str(bun).zfill(4),
+            "ji": str(ji).zfill(4),
+            "pageNo": page,
+            "numOfRows": 100,
+            "_type": "json"
+        }
 
-        data = response.json()
-
-        header = data.get("response", {}).get("header", {})
-        body = data.get("response", {}).get("body", {})
-
-        result_code = str(header.get("resultCode", ""))
-        result_msg = str(header.get("resultMsg", ""))
-
-        if result_code not in ("00", "0", ""):
-            raise Exception(
-                f"전유공용면적 API 오류: {result_code} / {result_msg}"
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=10
             )
 
-        items = body.get("items", {}).get("item", [])
+            response.raise_for_status()
 
-        if isinstance(items, dict):
-            items = [items]
+            data = response.json()
 
-        return items
+            header = data.get("response", {}).get("header", {})
+            body = data.get("response", {}).get("body", {})
 
-    except requests.exceptions.Timeout:
-        raise Exception("전유공용면적 API 시간 초과")
+            result_code = str(header.get("resultCode", ""))
+            result_msg = str(header.get("resultMsg", ""))
 
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"전유공용면적 HTTP 오류: {e}")
+            if result_code not in ("00", "0", ""):
+                raise Exception(
+                    f"전유공용면적 API 오류: {result_code} / {result_msg}"
+                )
 
-    except Exception as e:
-        raise Exception(str(e))
+            items = body.get("items", {}).get("item", [])
+
+            if isinstance(items, dict):
+                items = [items]
+
+            if not items:
+                break
+
+            all_items.extend(items)
+
+            if len(items) < 100:
+                break
+
+        except requests.exceptions.Timeout:
+            raise Exception("전유공용면적 API 시간 초과")
+
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"전유공용면적 HTTP 오류: {e}")
+
+        except Exception as e:
+            raise Exception(str(e))
+
+    return all_items
 
 
 # ============================================================
