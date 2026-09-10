@@ -864,8 +864,8 @@ def process_address(address, progress=None):
             platGbCd,
             juso["bun"],
             juso["ji"],
-            target_dong,
-            target_ho
+            target_dong + "동" if target_dong else "",
+            target_ho + "호" if target_ho else ""
         )
         
 
