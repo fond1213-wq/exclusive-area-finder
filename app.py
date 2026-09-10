@@ -106,7 +106,7 @@ def search_juso_single(keyword):
             data = res.json()
         except ValueError:
             debug_info["raw_text"] = res.text[:800]
-            return None, "Juso API 응답이 JSON이 아닙니다", debug_info
+            return None, "Juso API 응답이 JSON이 아닙니다 (키 오류 가능성)", debug_info
 
         common = data.get("results", {}).get("common", {})
         err_code = common.get("errorCode", "")
@@ -125,7 +125,7 @@ def search_juso_single(keyword):
         j = juso_list[0]
         admCd = j.get("admCd", "")
         if len(admCd) < 10:
-            return None, "admCd 형식 오류", debug_info
+            return None, "admCd(행정구역코드) 형식 오류", debug_info
 
         sigunguCd = admCd[:5]
         bjdongCd = admCd[5:10]
@@ -153,6 +153,7 @@ def search_juso_single(keyword):
 
     except requests.exceptions.RequestException as e:
         return None, f"Juso API 요청 실패: {e}", debug_info
+
 
 def search_juso(address):
     clean_addr = sanitize_road_address(address)
@@ -198,10 +199,11 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
 
         try:
             res = requests.get(url, params=params, timeout=15)
+
             try:
                 data = res.json()
             except ValueError:
-                error_msg = f"[{endpoint}] JSON 파싱 실패 (HTTP {res.status_code})"
+                error_msg = f"[{endpoint}] JSON 파싱 실패 (HTTP {res.status_code}) - 서비스키 오류 가능성. 응답: {res.text[:300]}"
                 debug_snippets.append({"endpoint": endpoint, "raw_text": res.text[:500], "status_code": res.status_code})
                 break
 
@@ -231,19 +233,23 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
 
             all_items.extend(item_list)
 
-            # 조기 종료 체크: 동/호수 모두 엄격하게 일치하는 전유부 항목이 발견되었는지 확인
+            total_count = int(body.get("totalCount", 0) or 0)
+            if total_pages_needed is None:
+                total_pages_needed = max(1, -(-total_count // ROWS_PER_PAGE))
+
             if match_check is not None:
                 for it in item_list:
                     if match_check(it):
                         return all_items, error_msg, debug_snippets
 
-            total_count = int(body.get("totalCount", 0) or 0)
-            if total_pages_needed is None:
-                total_pages_needed = max(1, -(-total_count // ROWS_PER_PAGE))
-
             if len(all_items) >= total_count:
                 break
             if page >= min(total_pages_needed, MAX_PAGES):
+                if page >= MAX_PAGES and len(all_items) < total_count:
+                    error_msg = (
+                        f"[{endpoint}] 안전 상한({MAX_PAGES * ROWS_PER_PAGE}건)까지 조회했으나 "
+                        f"전체 {total_count}건 중 일부만 확인했습니다. (초대형 단지)"
+                    )
                 break
             page += 1
 
@@ -254,7 +260,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 전용면적 정밀 매칭 엔진 (수정됨)
+# 5. 전용면적 정밀 매칭 엔진 (오매칭 방지 강화판)
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_dong, target_ho):
@@ -267,87 +273,91 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     all_errors = []
     all_debug = []
 
-    def _match_check(item):
-        """조기 종료용 검사: 동/호수 정밀 매칭 + 전유부 구분코드 확인"""
+    def _is_exclusive(item):
+        """전유 항목 여부 (코드 '1' 우선, 명칭은 보조)"""
         gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
         gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
-        is_expos = (gb_cd == "1" or "전유" in gb_nm)
+        return gb_cd == "1" or ("전유" in gb_nm and "공용" not in gb_nm)
 
+    def _safe_area(item):
+        """면적 파싱 + 상식적 범위(5~500㎡) 검증"""
+        try:
+            v = float(str(item.get("area", "0")).replace(",", ""))
+            if 5.0 <= v <= 500.0:
+                return round(v, 2)
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    # 전유공용면적 API용 match_check (전유 필터 포함 -> 공용에서 조기종료 방지)
+    def _check_pubuse(item):
+        if not _is_exclusive(item):
+            return False
         if target_dong and target_ho:
-            return is_expos and is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", ""))
-        elif target_ho:
-            return is_expos and is_match(target_ho, item.get("hoNm", ""))
+            return is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", ""))
+        if target_ho:
+            return is_match(target_ho, item.get("hoNm", ""))
+        return False
+
+    # 전유부 API용 match_check
+    def _check_expos(item):
+        if target_dong and target_ho:
+            return is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", ""))
+        if target_ho:
+            return is_match(target_ho, item.get("hoNm", ""))
         return False
 
     for current_ji in ji_variants:
         for platGbCd in plat_gb_candidates:
-            # 1. 전유공용면적 API 조회
+
+            # 1) 전유공용면적 API
             area_list, err1, dbg1 = call_api_all_pages(
                 "getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
-                match_check=_match_check,
+                match_check=_check_pubuse,
             )
             if err1:
                 all_errors.append(err1)
             all_debug.extend(dbg1)
 
-            if area_list:
-                # 1순위: 동 + 호수 정밀 매칭 (전유 면적)
-                if target_dong and target_ho:
-                    for a in area_list:
-                        gb_cd = str(a.get("exposPubuseGbCd", "")).strip()
-                        gb_nm = str(a.get("exposPubuseGbCdNm", "")).strip()
-                        if gb_cd == "1" or "전유" in gb_nm:
-                            if is_match(target_dong, a.get("dongNm", "")) and is_match(target_ho, a.get("hoNm", "")):
-                                try:
-                                    val = float(str(a.get("area", "0")).replace(",", ""))
-                                    if val > 0:
-                                        return round(val, 2), "조회 성공", all_errors, all_debug
-                                except ValueError:
-                                    pass
+            if target_dong and target_ho:
+                for a in area_list:
+                    if not _is_exclusive(a):
+                        continue
+                    if is_match(target_dong, a.get("dongNm", "")) and is_match(target_ho, a.get("hoNm", "")):
+                        val = _safe_area(a)
+                        if val is not None:
+                            return val, "조회 성공", all_errors, all_debug
+                # 동이 명시됐는데 못 찾으면 호수만으로 폴백하지 않는다 (오매칭 방지)
+            elif target_ho:
+                for a in area_list:
+                    if not _is_exclusive(a):
+                        continue
+                    if is_match(target_ho, a.get("hoNm", "")):
+                        val = _safe_area(a)
+                        if val is not None:
+                            return val, "조회 성공 (호수 기준)", all_errors, all_debug
 
-                # 2순위: 동 정보가 없는 경우에만 호수 기준으로 탐색
-                if not target_dong and target_ho:
-                    for a in area_list:
-                        gb_cd = str(a.get("exposPubuseGbCd", "")).strip()
-                        gb_nm = str(a.get("exposPubuseGbCdNm", "")).strip()
-                        if gb_cd == "1" or "전유" in gb_nm:
-                            if is_match(target_ho, a.get("hoNm", "")):
-                                try:
-                                    val = float(str(a.get("area", "0")).replace(",", ""))
-                                    if val > 0:
-                                        return round(val, 2), "조회 성공 (호수 기준)", all_errors, all_debug
-                                except ValueError:
-                                    pass
-
-            # 2. 전유부 API 보조 조회
+            # 2) 전유부 API (보조 수단)
             expos_list, err2, dbg2 = call_api_all_pages(
                 "getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
-                match_check=_match_check,
+                match_check=_check_expos,
             )
             if err2:
                 all_errors.append(err2)
             all_debug.extend(dbg2)
 
-            if expos_list:
-                if target_dong and target_ho:
-                    for item in expos_list:
-                        if is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", "")):
-                            try:
-                                val = float(str(item.get("area", "0")).replace(",", ""))
-                                if val > 0:
-                                    return round(val, 2), "조회 성공 (전유부 기준)", all_errors, all_debug
-                            except ValueError:
-                                pass
-
-                if not target_dong and target_ho:
-                    for item in expos_list:
-                        if is_match(target_ho, item.get("hoNm", "")):
-                            try:
-                                val = float(str(item.get("area", "0")).replace(",", ""))
-                                if val > 0:
-                                    return round(val, 2), "조회 성공 (전유부 호수 기준)", all_errors, all_debug
-                            except ValueError:
-                                pass
+            if target_dong and target_ho:
+                for item in expos_list:
+                    if is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", "")):
+                        val = _safe_area(item)
+                        if val is not None:
+                            return val, "조회 성공 (전유부 기준)", all_errors, all_debug
+            elif target_ho:
+                for item in expos_list:
+                    if is_match(target_ho, item.get("hoNm", "")):
+                        val = _safe_area(item)
+                        if val is not None:
+                            return val, "조회 성공 (전유부 호수 기준)", all_errors, all_debug
 
     status = "동/호 전유면적 매칭 실패"
     if all_errors:
@@ -355,7 +365,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     return None, status, all_errors, all_debug
 
 # ============================================================
-# 6. 프로세스 실행 및 UI
+# 6. 프로세스 실행
 # ============================================================
 
 def process_address(address, progress=None):
@@ -374,6 +384,14 @@ def process_address(address, progress=None):
             f"| 법정동: {juso['sigunguCd']}{juso['bjdongCd']}, 지번: {juso['bun']}-{juso['ji']} "
             f"| 인식된 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'"
         )
+        if not target_dong and target_ho:
+            progress.warning(
+                f"⚠️ 주소에서 '동'을 인식하지 못했습니다. 호수('{target_ho}')만으로 매칭하므로 "
+                f"같은 호수가 여러 동에 있으면 잘못된 면적이 나올 수 있습니다. "
+                f"'101동 2103호' 형식으로 입력하세요."
+            )
+        if not target_ho:
+            progress.warning("⚠️ '호'를 인식하지 못했습니다. '101동 2103호' 형식으로 입력해주세요.")
 
     area, status, errors, api_debug = find_dedicated_area(
         juso["sigunguCd"],
@@ -388,12 +406,22 @@ def process_address(address, progress=None):
     debug_bundle = {"juso_debug": juso_debug, "api_debug": api_debug, "errors": errors}
 
     if area:
-        return {"주소": address, "전용면적": f"{area:.2f}㎡", "상태": status}, debug_bundle
+        confidence = "확정" if (target_dong and target_ho) else "추정"
+        return {
+            "주소": address,
+            "전용면적": f"{area:.2f}㎡",
+            "상태": f"{status} [{confidence}]",
+        }, debug_bundle
     else:
         return {"주소": address, "전용면적": "", "상태": status}, debug_bundle
 
+# ============================================================
+# 7. UI 화면
+# ============================================================
+
 st.title("🏠 건축물 전용면적 조회")
 st.write("주소를 입력하시면 동/호수 매칭을 거쳐 세대별 전용면적을 가져옵니다.")
+st.caption("💡 정확한 조회를 위해 **'OO동 OOOO호'** 형식으로 입력하세요. (예: 서울특별시 성동구 왕십리로410 129동 2103호)")
 
 addresses = []
 for i in range(10):
@@ -422,7 +450,10 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         results.append(result)
 
         if result["전용면적"]:
-            st.success(f"전용면적: {result['전용면적']} ({result['상태']})")
+            if "[확정]" in result["상태"]:
+                st.success(f"전용면적: {result['전용면적']} ({result['상태']})")
+            else:
+                st.warning(f"전용면적(추정): {result['전용면적']} ({result['상태']})")
         else:
             st.error(f"조회 실패: {result['상태']}")
 
