@@ -393,7 +393,9 @@ def get_area_info(
     bjdongCd,
     platGbCd,
     bun,
-    ji
+    ji,
+    dongNm,
+    hoNm
 ):
 
     url = BUILDING_API_BASE + "/getBrExposPubuseAreaInfo"
@@ -405,6 +407,8 @@ def get_area_info(
         "platGbCd": str(platGbCd),
         "bun": str(bun).zfill(4),
         "ji": str(ji).zfill(4),
+        "dongNm": str(dongNm),
+        "hoNm": str(hoNm),
         "pageNo": 1,
         "numOfRows": 100,
         "_type": "json"
@@ -442,7 +446,6 @@ def get_area_info(
             header.get("resultMsg", "")
         )
 
-        # API 오류 확인
         if result_code not in ("00", "0", ""):
 
             raise Exception(
@@ -457,7 +460,6 @@ def get_area_info(
         )
 
         if isinstance(items, dict):
-
             items = [items]
 
         return items
@@ -477,6 +479,8 @@ def get_area_info(
     except Exception as e:
 
         raise Exception(str(e))
+
+
 
 # ============================================================
 # 8. 전용면적 매칭
@@ -859,9 +863,14 @@ def process_address(address, progress=None):
             juso["bjdongCd"],
             platGbCd,
             juso["bun"],
-            juso["ji"]
+            juso["ji"],
+            target_dong,
+            target_ho
         )
+        
 
+
+        
         if not area_items:
 
             return {
