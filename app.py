@@ -388,15 +388,7 @@ def get_expos_info(
 # 7. 전유공용면적
 # ============================================================
 
-def get_area_info(
-    sigunguCd,
-    bjdongCd,
-    platGbCd,
-    bun,
-    ji,
-    dongNm,
-    hoNm
-):
+def get_area_info(sigunguCd, bjdongCd, platGbCd, bun, ji):
 
     url = BUILDING_API_BASE + "/getBrExposPubuseAreaInfo"
 
@@ -413,7 +405,6 @@ def get_area_info(
     }
 
     try:
-
         response = requests.get(
             url,
             params=params,
@@ -424,38 +415,18 @@ def get_area_info(
 
         data = response.json()
 
-        header = (
-            data
-            .get("response", {})
-            .get("header", {})
-        )
+        header = data.get("response", {}).get("header", {})
+        body = data.get("response", {}).get("body", {})
 
-        body = (
-            data
-            .get("response", {})
-            .get("body", {})
-        )
-
-        result_code = str(
-            header.get("resultCode", "")
-        )
-
-        result_msg = str(
-            header.get("resultMsg", "")
-        )
+        result_code = str(header.get("resultCode", ""))
+        result_msg = str(header.get("resultMsg", ""))
 
         if result_code not in ("00", "0", ""):
-
             raise Exception(
-                f"전유공용면적 API 오류: "
-                f"{result_code} / {result_msg}"
+                f"전유공용면적 API 오류: {result_code} / {result_msg}"
             )
 
-        items = (
-            body
-            .get("items", {})
-            .get("item", [])
-        )
+        items = body.get("items", {}).get("item", [])
 
         if isinstance(items, dict):
             items = [items]
@@ -463,21 +434,13 @@ def get_area_info(
         return items
 
     except requests.exceptions.Timeout:
-
-        raise Exception(
-            "전유공용면적 API 시간 초과"
-        )
+        raise Exception("전유공용면적 API 시간 초과")
 
     except requests.exceptions.RequestException as e:
-
-        raise Exception(
-            f"전유공용면적 HTTP 오류: {e}"
-        )
+        raise Exception(f"전유공용면적 HTTP 오류: {e}")
 
     except Exception as e:
-
         raise Exception(str(e))
-
 
 
 # ============================================================
