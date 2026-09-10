@@ -395,6 +395,7 @@ def get_area_info(
     bun,
     ji
 ):
+
     url = BUILDING_API_BASE + "/getBrExposPubuseAreaInfo"
 
     params = {
@@ -404,12 +405,13 @@ def get_area_info(
         "platGbCd": str(platGbCd),
         "bun": str(bun).zfill(4),
         "ji": str(ji).zfill(4),
-        "pageNo": "1",
-        "numOfRows": "100",
+        "pageNo": 1,
+        "numOfRows": 100,
         "_type": "json"
     }
 
     try:
+
         response = requests.get(
             url,
             params=params,
@@ -420,18 +422,33 @@ def get_area_info(
 
         data = response.json()
 
-        response_data = data.get("response", {})
-        header = response_data.get("header", {})
-        body = response_data.get("body", {})
+        header = (
+            data
+            .get("response", {})
+            .get("header", {})
+        )
 
-        result_code = str(header.get("resultCode", ""))
-        result_msg = header.get("resultMsg", "")
+        body = (
+            data
+            .get("response", {})
+            .get("body", {})
+        )
 
-        # API 오류
+        result_code = str(
+            header.get("resultCode", "")
+        )
+
+        result_msg = str(
+            header.get("resultMsg", "")
+        )
+
+        # API 오류 확인
         if result_code not in ("00", "0", ""):
-            return {
-                "error": f"API 오류: {result_code} / {result_msg}"
-            }
+
+            raise Exception(
+                f"전유공용면적 API 오류: "
+                f"{result_code} / {result_msg}"
+            )
 
         items = (
             body
@@ -440,27 +457,26 @@ def get_area_info(
         )
 
         if isinstance(items, dict):
+
             items = [items]
 
-        return {
-            "items": items
-        }
+        return items
 
     except requests.exceptions.Timeout:
-        return {
-            "error": "전유공용면적 API 응답시간 초과"
-        }
+
+        raise Exception(
+            "전유공용면적 API 시간 초과"
+        )
 
     except requests.exceptions.RequestException as e:
-        return {
-            "error": f"HTTP 오류: {str(e)}"
-        }
+
+        raise Exception(
+            f"전유공용면적 HTTP 오류: {e}"
+        )
 
     except Exception as e:
-        return {
-            "error": f"처리 오류: {str(e)}"
-        }
 
+        raise Exception(str(e))
 
 # ============================================================
 # 8. 전용면적 매칭
