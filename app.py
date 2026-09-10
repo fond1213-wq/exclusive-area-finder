@@ -25,7 +25,7 @@ JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=True)
 
 # ============================================================
-# 2. 정규화 / 파싱 (is_match 개선: A동 같은 영문 동도 지원)
+# 2. 정규화 / 파싱
 # ============================================================
 
 def normalize_name(s):
@@ -46,43 +46,88 @@ def is_match(target, source):
     return t.upper() == s.upper()
 
 def extract_dong_ho(address):
+    """주소에서 동, 호수 추출. '동아파트' 같은 건물명은 배제."""
     text = str(address).strip()
     dong, ho = "", ""
-    # 동: 숫자 or 영문자 + '동'
-    m_dong = re.search(r"([0-9A-Za-z]+)\s*동", text)
+
+    # ★ 동: 숫자/영문 + '동' 이고 뒤에 한글이 오지 않아야 함 (동아파트 제외)
+    m_dong = re.search(r"([0-9A-Za-z]+)\s*동(?![가-힣])", text)
     if m_dong:
         dong = m_dong.group(1)
-    m_ho = re.search(r"(\d+)\s*호", text)
+
+    # ★ 호: 숫자 + '호'
+    m_ho = re.search(r"(\d+)\s*호(?![가-힣])", text)
     if m_ho:
         ho = m_ho.group(1)
+
+    # 폴백: 129-2103 형식
     if not dong and not ho:
         m_dash = re.search(r"(\d{2,4})-(\d{3,4})\b", text)
         if m_dash:
             dong = m_dash.group(1)
             ho = m_dash.group(2)
+
+    # 폴백: 마지막 토큰이 3자리 이상 숫자면 호수로
     if not ho:
         tokens = text.split()
         if tokens and tokens[-1].isdigit() and len(tokens[-1]) >= 3:
             ho = tokens[-1]
+
     return dong, ho
 
-def sanitize_road_address(address):
+
+def extract_road_pattern(address):
+    """(도로명, 건물번호) 추출. '신반포로33길 15' 같은 하위 도로 지원."""
     text = str(address).strip()
-    text = re.sub(r"[0-9A-Za-z]+\s*동.*", "", text)
-    text = re.sub(r"\d+\s*호.*", "", text)
-    text = re.sub(r"\d+-\d+.*", "", text)
-    m = re.search(r"([가-힣a-zA-Z0-9\s]+(?:로|길|대로)\s*\d+(?:-\d+)?)", text)
+    # (로|길|대로) + 선택적 (숫자+로|길) + 건물번호
+    m = re.search(r"([가-힣]+(?:로|길|대로)(?:\d+(?:로|길))?)\s*(\d+(?:-\d+)?)", text)
     if m:
-        return m.group(1).strip()
+        return m.group(1), m.group(2)
+    return None, None
+
+
+def sanitize_road_address(address):
+    """도로명+건물번호만 추출. '신반포로33길 15' 같은 하위도로 보존."""
+    text = str(address).strip()
+    # 동/호수 제거 — '동아파트' 같은 건물명은 앞에 alnum이 없으므로 안전
+    text = re.sub(r"\s+[0-9A-Za-z]+\s*동(?![가-힣]).*", "", text)
+    text = re.sub(r"\s+\d+\s*호(?![가-힣]).*", "", text)
+
+    road, num = extract_road_pattern(text)
+    if road and num:
+        m = re.search(re.escape(road) + r"\s*" + re.escape(num), text)
+        if m:
+            return text[:m.end()].strip()
     return text.strip()
 
+
+def validate_juso_match(user_input, juso_item):
+    """Juso가 반환한 주소가 사용자 입력과 실제로 일치하는지 검증"""
+    user_road, user_num = extract_road_pattern(user_input)
+    if not user_road or not user_num:
+        return True  # 검증 불가 → 통과
+
+    juso_addr = (
+        (juso_item.get("roadAddrPart1", "") or "") + " " +
+        (juso_item.get("roadAddrPart2", "") or "")
+    )
+    juso_norm = juso_addr.replace(" ", "")
+
+    if user_road.replace(" ", "") not in juso_norm:
+        return False
+    if user_num not in juso_norm:
+        return False
+    return True
+
+
 # ============================================================
-# 3. Juso API
+# 3. Juso API (여러 결과 순회 + 검증)
 # ============================================================
 
 def search_juso_single(keyword):
+    """keyword로 검색해 juso 리스트 반환"""
     params = {
-        "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": 5,
+        "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": 10,
         "keyword": keyword, "resultType": "json", "addInfoYn": "Y",
     }
     dbg = {"keyword": keyword}
@@ -93,60 +138,79 @@ def search_juso_single(keyword):
             data = res.json()
         except ValueError:
             dbg["raw_text"] = res.text[:500]
-            return None, "Juso API 응답이 JSON이 아닙니다", dbg
+            return [], "JSON 파싱 실패", dbg
         common = data.get("results", {}).get("common", {})
         err_code = common.get("errorCode", "")
         if err_code and err_code != "0":
-            return None, f"Juso API 오류 [{err_code}] {common.get('errorMessage','')}", dbg
+            return [], f"오류 [{err_code}] {common.get('errorMessage','')}", dbg
         juso_list = data.get("results", {}).get("juso", [])
-        if not juso_list:
-            return None, "검색 결과 없음", dbg
-        j = juso_list[0]
-        admCd = j.get("admCd", "")
-        if len(admCd) < 10:
-            return None, "admCd 오류", dbg
-        lnbr_mnnm = j.get("lnbrMnnm", "")
-        lnbr_slno = j.get("lnbrSlno", "")
-        mt_yn = j.get("mtYn", "0")
-        bun = str(int(lnbr_mnnm)) if lnbr_mnnm and lnbr_mnnm.isdigit() else "0"
-        ji = str(int(lnbr_slno)) if lnbr_slno and lnbr_slno.isdigit() else "0"
-        plat_gb_cd = "1" if str(mt_yn) == "1" else "0"
-        dbg["raw_juso_item"] = j
-        return {
-            "sigunguCd": admCd[:5], "bjdongCd": admCd[5:10],
-            "bun": bun, "ji": ji, "platGbCd": plat_gb_cd,
-            "jibunAddr": j.get("jibunAddr", ""), "bdNm": j.get("bdNm", ""),
-        }, "정상", dbg
+        dbg["juso_count"] = len(juso_list)
+        dbg["juso_short"] = [
+            {"road": j.get("roadAddr", ""), "jibun": j.get("jibunAddr", ""), "bdNm": j.get("bdNm", "")}
+            for j in juso_list
+        ]
+        return juso_list, "정상", dbg
     except requests.exceptions.RequestException as e:
-        return None, f"Juso API 요청 실패: {e}", dbg
+        return [], f"요청 실패: {e}", dbg
+
+
+def _juso_item_to_dict(j):
+    admCd = j.get("admCd", "")
+    if len(admCd) < 10:
+        return None
+    lnbr_mnnm = j.get("lnbrMnnm", "")
+    lnbr_slno = j.get("lnbrSlno", "")
+    mt_yn = j.get("mtYn", "0")
+    bun = str(int(lnbr_mnnm)) if lnbr_mnnm and lnbr_mnnm.isdigit() else "0"
+    ji = str(int(lnbr_slno)) if lnbr_slno and lnbr_slno.isdigit() else "0"
+    plat_gb_cd = "1" if str(mt_yn) == "1" else "0"
+    return {
+        "sigunguCd": admCd[:5], "bjdongCd": admCd[5:10],
+        "bun": bun, "ji": ji, "platGbCd": plat_gb_cd,
+        "jibunAddr": j.get("jibunAddr", ""), "bdNm": j.get("bdNm", ""),
+        "roadAddr": j.get("roadAddr", ""),
+    }
+
 
 def search_juso(address):
-    clean_addr = sanitize_road_address(address)
-    res, msg, dbg = search_juso_single(clean_addr)
-    if res:
-        return res, msg, dbg
-    res2, msg2, dbg2 = search_juso_single(address)
-    if res2:
-        return res2, msg2, dbg2
-    return None, f"{msg} / 재시도: {msg2}", {"1차": dbg, "2차": dbg2}
+    """원본 → sanitize 순으로 시도, 각 결과를 검증 후 첫 매칭 반환"""
+    all_dbg = {}
+    candidates = [("raw", address)]
+    clean = sanitize_road_address(address)
+    if clean and clean != address:
+        candidates.append(("sanitized", clean))
+
+    last_msg = ""
+    for label, kw in candidates:
+        juso_list, msg, dbg = search_juso_single(kw)
+        all_dbg[label] = dbg
+        last_msg = msg
+        if not juso_list:
+            continue
+        # ★ 반환된 후보 중 사용자 입력과 검증 통과한 것만 채택 ★
+        for j in juso_list:
+            if not validate_juso_match(address, j):
+                continue
+            d = _juso_item_to_dict(j)
+            if d:
+                d["_matched_by"] = label
+                return d, "정상", all_dbg
+
+    return None, f"주소 매칭 실패 (검증 통과 결과 없음): {last_msg}", all_dbg
+
 
 # ============================================================
 # 4. 국토부 API 호출
 # ============================================================
 
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
-                       match_check=None, extra_params=None,
-                       collect_all=False):
+                       match_check=None, extra_params=None, collect_all=False):
     url = f"{BUILDING_API_BASE}/{endpoint}"
     bun_str = str(bun).zfill(4)
     ji_str = str(ji).zfill(4)
 
-    all_items = []
-    page = 1
-    error_msg = None
-    debug_snippets = []
-    ROWS_PER_PAGE = 1000
-    MAX_PAGES = 40
+    all_items, page, error_msg, debug_snippets = [], 1, None, []
+    ROWS_PER_PAGE, MAX_PAGES = 1000, 40
     total_pages_needed = None
 
     while True:
@@ -169,12 +233,9 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
             try:
                 data = res.json()
             except ValueError:
-                error_msg = f"[{endpoint}] JSON 파싱 실패 (HTTP {res.status_code})"
-                debug_snippets.append({
-                    "endpoint": endpoint, "status_code": res.status_code,
-                    "raw": raw_text[:200],
-                    "params": {k: v for k, v in params.items() if k != "serviceKey"},
-                })
+                error_msg = f"[{endpoint}] JSON 파싱 실패"
+                debug_snippets.append({"endpoint": endpoint, "status": res.status_code,
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"}})
                 break
 
             header = data.get("response", {}).get("header", {})
@@ -230,8 +291,9 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
 
     return all_items, error_msg, debug_snippets
 
+
 # ============================================================
-# 5. 매칭 엔진 (필터 조합 전면 재정비)
+# 5. 매칭 엔진
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_dong, target_ho):
@@ -244,8 +306,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
 
     plat_gb_candidates = [plat_gb_cd_hint] + [c for c in ["0", "1", "2"] if c != plat_gb_cd_hint]
 
-    all_errors = []
-    all_debug = []
+    all_errors, all_debug = [], []
 
     def _is_exclusive(item):
         gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
@@ -264,17 +325,26 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     def _matches(item):
         if not _is_exclusive(item):
             return False
-        d = item.get("dongNm", "")
-        h = item.get("hoNm", "")
-        if target_dong and target_ho:
-            return is_match(target_dong, d) and is_match(target_ho, h)
-        return is_match(target_ho, h)
+        d = (item.get("dongNm") or "").strip()
+        h = (item.get("hoNm") or "").strip()
 
-    # ★★★ 필터 조합 대폭 확장 (실제 데이터 형식 "129동" + "2103" 포함) ★★★
+        # 호수는 항상 필수
+        if not is_match(target_ho, h):
+            return False
+
+        # 동: 입력에 있고 데이터에도 있으면 비교
+        if target_dong:
+            if not d:
+                # 데이터에 동 정보가 없음 → 단일동 건물로 간주, 통과
+                return True
+            return is_match(target_dong, d)
+        return True
+
+    # 필터 조합 (실제 데이터 형식 "129동" + "2103" 우선)
     filter_sets = []
-    if target_dong and target_ho:
+    if target_dong:
         filter_sets = [
-            {"dongNm": f"{target_dong}동", "hoNm": str(target_ho)},   # ← 실제 데이터 형식
+            {"dongNm": f"{target_dong}동", "hoNm": str(target_ho)},
             {"dongNm": str(target_dong), "hoNm": str(target_ho)},
             {"dongNm": f"{target_dong}동", "hoNm": f"{target_ho}호"},
             {"dongNm": str(target_dong), "hoNm": f"{target_ho}호"},
@@ -282,7 +352,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     else:
         filter_sets = [{"hoNm": str(target_ho)}]
 
-    # ---------- 1단계: 필터 시도 ----------
+    # 1단계: 필터 시도
     for extra in filter_sets:
         for platGbCd in plat_gb_candidates:
             for current_ji in ji_variants:
@@ -294,15 +364,14 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
                 if err1:
                     all_errors.append(err1)
                 all_debug.extend(dbg1)
-
                 for a in area_list:
                     if _matches(a):
                         val = _safe_area(a)
                         if val is not None:
                             return val, "조회 성공 (필터)", all_errors, all_debug
 
-    # ---------- 2단계: 전체조회 후 클라이언트 매칭 ----------
-    survey_items = []   # 매칭 실패 시 사용자에게 보여줄 정보
+    # 2단계: 전체조회 후 클라이언트 매칭
+    survey_items = []
     for platGbCd in plat_gb_candidates:
         for current_ji in ji_variants:
             area_list, err1, dbg1 = call_api_all_pages(
@@ -320,31 +389,31 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
                 val = _safe_area(matched[0])
                 if val is not None:
                     return val, "조회 성공 (전체조회)", all_errors, all_debug
-
-            # platGbCd=0에서 이미 다 가져왔으면 다른 platGbCd는 스킵
             if area_list:
                 break
 
-    # ---------- 3단계: 매칭 실패 → 어떤 동/호가 있는지 리포트 ----------
-    available_dongs = sorted({i.get("dongNm", "") for i in survey_items if i.get("dongNm")})
-    # 타겟 동의 호수 목록
+    # 3단계: 실패 리포트
     target_dong_hos = sorted(
         {i.get("hoNm", "") for i in survey_items
          if is_match(target_dong, i.get("dongNm", "")) and i.get("hoNm")},
         key=lambda x: (len(x), x)
     ) if target_dong else []
 
+    available_dongs = sorted({(i.get("dongNm") or "").strip() for i in survey_items
+                              if (i.get("dongNm") or "").strip()})
+
     hint = ""
     if target_dong and target_dong_hos:
         preview = ", ".join(target_dong_hos[:20])
         hint = f" | '{target_dong}동'에 존재하는 호수: [{preview}{'...' if len(target_dong_hos)>20 else ''}]"
-    elif target_dong and not target_dong_hos:
-        hint = f" | '{target_dong}동'이 이 건물에 없습니다. 존재하는 동: {', '.join(available_dongs[:15])}"
+    elif target_dong and not target_dong_hos and available_dongs:
+        hint = f" | '{target_dong}동'이 없습니다. 존재하는 동: {', '.join(available_dongs[:15])}"
 
-    status = f"동/호 매칭 실패 (입력: {target_dong}동 {target_ho}호){hint}"
+    status = f"동/호 매칭 실패 (입력: {target_dong or '?'}동 {target_ho}호){hint}"
     if all_errors:
         status += f" | API 오류: {all_errors[0]}"
     return None, status, all_errors, all_debug
+
 
 # ============================================================
 # 6. 프로세스 실행
@@ -361,12 +430,12 @@ def process_address(address, progress=None):
 
     if progress:
         progress.write(
-            f"① 지번: {juso['jibunAddr']} | 법정동: {juso['sigunguCd']}{juso['bjdongCd']} "
-            f"| 지번: {juso['bun']}-{juso['ji']} (platGbCd={juso['platGbCd']}) "
+            f"① 매칭({juso.get('_matched_by','-')}): {juso['jibunAddr']} "
+            f"| 법정동: {juso['sigunguCd']}{juso['bjdongCd']}, 지번: {juso['bun']}-{juso['ji']} "
             f"| 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'"
         )
         if not target_dong:
-            progress.warning("⚠️ 주소에 '동'이 없어 호수만으로 매칭합니다. '101동 2103호' 형식 권장.")
+            progress.warning("⚠️ 주소에 '동'이 없어 호수만으로 매칭합니다.")
         if not target_ho:
             progress.warning("⚠️ 주소에 '호'가 없어 조회할 수 없습니다.")
 
@@ -382,17 +451,18 @@ def process_address(address, progress=None):
         return {"주소": address, "전용면적": f"{area:.2f}㎡", "상태": f"{status} [{confidence}]"}, debug_bundle
     return {"주소": address, "전용면적": "", "상태": status}, debug_bundle
 
+
 # ============================================================
 # 7. UI
 # ============================================================
 
 st.title("🏠 건축물 전용면적 조회")
-st.caption("💡 **'OO동 OOOO호'** 형식으로 입력하세요. (예: 서울특별시 성동구 왕십리로410 129동 1605호)")
+st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 103동 701호)")
 
 addresses = []
 for i in range(10):
     address = st.text_input(f"주소 {i + 1}", key=f"address_{i}",
-                            placeholder="예: 서울특별시 성동구 왕십리로410 129동 1605호")
+                            placeholder="예: 서울시 서초구 신반포로33길 15 103동 701호")
     addresses.append(address.strip())
 
 if st.button("🔎 전용면적 조회", type="primary", use_container_width=True):
@@ -408,7 +478,6 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         progress_box = st.empty()
         result, debug_bundle = process_address(address, progress_box)
         results.append(result)
-
         if result["전용면적"]:
             if "[확정]" in result["상태"]:
                 st.success(f"전용면적: {result['전용면적']} ({result['상태']})")
