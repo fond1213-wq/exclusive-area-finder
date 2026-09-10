@@ -27,9 +27,7 @@ DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=True)
 # 2. 파싱 유틸
 # ============================================================
 def clean_address_for_parsing(address):
-    """괄호 안 추가정보 제거
-    예: '... 1300 (둔촌동, 올림픽파크포레온) 429동 402호'
-        → '... 1300 429동 402호'"""
+    """괄호 안 추가정보 제거"""
     text = str(address).strip()
     prev = None
     while prev != text:
@@ -38,10 +36,30 @@ def clean_address_for_parsing(address):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
+def extract_bldnm_from_parens(address):
+    """괄호 안에서 건물명 후보 추출 (지명 접미어 제외)"""
+    results = []
+    for m in re.finditer(r"\(([^()]*)\)", str(address)):
+        for tok in re.split(r"[,，]", m.group(1)):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok.endswith(("동", "읍", "면", "리", "가")):
+                continue
+            results.append(tok)
+    return results
+
 def normalize_name(s):
     if s is None:
         return ""
     return re.sub(r"[동호제\s]", "", str(s).strip())
+
+def normalize_bldnm(s):
+    if s is None:
+        return ""
+    s = re.sub(r"\s+", "", str(s))
+    s = s.replace("-", "").replace("_", "")
+    return s.lower()
 
 def is_match(target, source):
     t, s = normalize_name(target), normalize_name(source)
@@ -52,7 +70,6 @@ def is_match(target, source):
     return t.upper() == s.upper()
 
 def extract_dong_ho(address):
-    # 괄호 내용 먼저 제거
     text = clean_address_for_parsing(address)
     dong = ho = ""
     m = re.search(r"([0-9A-Za-z]+)\s*동(?![가-힣])", text)
@@ -77,7 +94,6 @@ def extract_road_pattern(address):
     return (m.group(1), m.group(2)) if m else (None, None)
 
 def sanitize_road_address(address):
-    # 괄호 내용 먼저 제거
     text = clean_address_for_parsing(address)
     text = re.sub(r"\s+[0-9A-Za-z]+\s*동(?![가-힣]).*", "", text)
     text = re.sub(r"\s+\d+\s*호(?![가-힣]).*", "", text)
@@ -128,7 +144,8 @@ def search_juso_single(keyword):
         dbg["juso_count"] = len(juso_list)
         dbg["juso_short"] = [
             {k: j.get(k, "") for k in ("roadAddr", "jibunAddr", "bdNm", "detBdNmList",
-                                       "relJibun", "lnbrMnnm", "lnbrSlno", "buldMnnm", "buldSlno")}
+                                       "relJibun", "lnbrMnnm", "lnbrSlno", "buldMnnm", "buldSlno",
+                                       "naBjdongCd", "naMainBun", "naSubBun")}
             for j in juso_list
         ]
         return juso_list, "정상", dbg
@@ -181,17 +198,12 @@ def search_juso(address):
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
 # ============================================================
-# 3-1. 도로명주소 검색 (건물명/일부주소 → 후보 목록)
+# 3-1. 도로명주소 검색
 # ============================================================
 def search_address_candidates(keyword, count=20):
-    """키워드로 Juso 검색 후 후보 리스트 반환"""
     params = {
-        "confmKey": JUSO_API_KEY,
-        "currentPage": 1,
-        "countPerPage": str(count),
-        "keyword": keyword,
-        "resultType": "json",
-        "addInfoYn": "Y",
+        "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": str(count),
+        "keyword": keyword, "resultType": "json", "addInfoYn": "Y",
     }
     try:
         res = requests.get(JUSO_API_URL, params=params, timeout=10)
@@ -306,13 +318,33 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 매칭 엔진 (platGbCd 0/1/2 + 표제부 폴백)
+# 5. 매칭 엔진 (bjdongCd variants + bldNm 검증)
 # ============================================================
+def _bjdong_variants(bjdongCd, alt=None):
+    """법정동코드 변형 생성: 원본, alt, 00↔01 swap"""
+    variants = []
+    def _add(v):
+        if v and v not in variants:
+            variants.append(v)
+    _add(bjdongCd)
+    if alt:
+        _add(alt)
+    # 끝 2자리가 00이면 01로, 01이면 00으로
+    if bjdongCd and len(bjdongCd) >= 2:
+        last2 = bjdongCd[-2:]
+        if last2 == "00":
+            _add(bjdongCd[:-2] + "01")
+        elif last2 == "01":
+            _add(bjdongCd[:-2] + "00")
+    return variants
+
+
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
-                        target_dong, target_ho, juso=None):
+                        target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
         return None, "호수를 인식하지 못했습니다.", [], []
 
+    expected_bldNm = expected_bldNm or []
     all_errors, all_debug = [], []
 
     def _is_exclusive(item):
@@ -333,8 +365,24 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         nums = re.findall(r"\d+", str(s or ""))
         return nums[-1] if nums else ""
 
+    def _bldnm_ok(item):
+        if not expected_bldNm:
+            return True
+        item_bld = normalize_bldnm(item.get("bldNm") or "")
+        if not item_bld:
+            return True
+        for exp in expected_bldNm:
+            en = normalize_bldnm(exp)
+            if not en:
+                continue
+            if en == item_bld or en in item_bld or item_bld in en:
+                return True
+        return False
+
     def _matches(item):
         if not _is_exclusive(item):
+            return False
+        if not _bldnm_ok(item):
             return False
         h = (item.get("hoNm") or "").strip()
         ok = is_match(target_ho, h) or (_ho_num(h) == str(target_ho).strip())
@@ -347,15 +395,10 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             return is_match(target_dong, d)
         return True
 
-    # ---------------- 조합 생성 ----------------
-    combos = []
-    def _add(pg, bd, b, j):
-        key = (str(pg), str(bd), str(b), str(j))
-        if key not in combos:
-            combos.append(key)
+    # ---------------- 법정동코드 조합 ----------------
+    bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
 
-    plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
-
+    # ---------------- 지번 후보 ----------------
     bun_ji_candidates = [(bun, ji)]
     if ji != "0":
         bun_ji_candidates.append((bun, "0"))
@@ -368,12 +411,33 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         for rb, rj in parse_rel_jibun(juso["relJibun"]):
             bun_ji_candidates.append((rb, rj))
 
-    bjdong_candidates = [bjdongCd]
-    if juso and juso.get("bjdongCd_alt"):
-        bjdong_candidates.append(juso["bjdongCd_alt"])
+    # 중복 제거
+    seen_bj = set()
+    bun_ji_unique = []
+    for b, j in bun_ji_candidates:
+        key = (str(b), str(j))
+        if key not in seen_bj:
+            seen_bj.add(key)
+            bun_ji_unique.append((b, j))
+    bun_ji_candidates = bun_ji_unique
 
+    plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
+
+    combos = []
+    def _add(pg, bd, b, j):
+        key = (str(pg), str(bd), str(b), str(j))
+        if key not in combos:
+            combos.append(key)
+
+    # ★ bjdongCd 변형을 최우선으로 배치 ★
+    for bd in bjdong_variants:
+        for b, j in bun_ji_candidates:
+            _add(platGbCd, bd, b, j)
+    # 나머지 platGbCd
     for pg in plat_candidates:
-        for bd in bjdong_candidates:
+        if pg == platGbCd:
+            continue
+        for bd in bjdong_variants:
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
@@ -389,8 +453,8 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     filter_attempts.append({"hoNm": str(target_ho)})
     filter_attempts.append({"hoNm": f"{target_ho}호"})
 
-    # ---------- 1단계: 필터 (앞 5개 combo) ----------
-    for pg, bd, b, j in combos[:5]:
+    # ---------- 1단계: 필터 (앞 8개 combo) ----------
+    for pg, bd, b, j in combos[:8]:
         for extra in filter_attempts:
             area_list, err1, dbg1 = call_api_all_pages(
                 "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
@@ -422,20 +486,24 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 val = _safe_area(matched[0])
                 if val is not None:
                     return val, "조회 성공 (전체조회)", all_errors, all_debug
+            # 첫 데이터 발견하면 그 combo까지만
             break
 
     # ---------- 3단계: 표제부 폴백 ----------
     if not any_data_found:
         title = None
         title_dbg = []
-        for pg in plat_candidates:
-            items, terr, tdbg = call_api_all_pages(
-                "getBrTitleInfo", sigunguCd, bjdongCd, pg, bun, ji,
-                match_check=None, extra_params=None, collect_all=True)
-            title_dbg.extend(tdbg)
-            if items:
-                items_sorted = sorted(items, key=lambda x: str(x.get("useAprDay", "")), reverse=True)
-                title = items_sorted[0]
+        for bd in bjdong_variants:
+            for pg in plat_candidates:
+                items, terr, tdbg = call_api_all_pages(
+                    "getBrTitleInfo", sigunguCd, bd, pg, bun, ji,
+                    match_check=None, extra_params=None, collect_all=True)
+                title_dbg.extend(tdbg)
+                if items:
+                    items_sorted = sorted(items, key=lambda x: str(x.get("useAprDay", "")), reverse=True)
+                    title = items_sorted[0]
+                    break
+            if title:
                 break
         all_debug.extend(title_dbg)
 
@@ -461,12 +529,14 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 pass
             return None, msg, all_errors, all_debug
 
-        tried = [f"{pg}/{bd}/{b}-{j}" for pg, bd, b, j in combos]
+        tried = [f"{pg}/{bd}/{b}-{j}" for pg, bd, b, j in combos[:8]]
         return None, (f"전유부·표제부 모두 데이터 없음. "
-                      f"입력 지번: {bun}-{ji}, bjdongCd: {bjdongCd}. "
-                      f"시도한 조합({len(tried)}개): {tried}"), all_errors, all_debug
+                      f"입력 지번: {bun}-{ji}, bjdongCd 변형: {bjdong_variants}. "
+                      f"시도한 조합(앞 8개): {tried}"), all_errors, all_debug
 
     # ---------- 4단계: 매칭 실패 리포트 ----------
+    all_bldnms = sorted({(i.get("bldNm") or "").strip() for i in survey_items
+                         if (i.get("bldNm") or "").strip()})
     all_dongs = sorted({(i.get("dongNm") or "").strip() for i in survey_items
                         if (i.get("dongNm") or "").strip()})
     all_hos = sorted({(i.get("hoNm") or "").strip() for i in survey_items
@@ -474,8 +544,20 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     similar_hos = [h for h in all_hos if _ho_num(h) == str(target_ho).strip()]
 
     hint_parts = []
+    if expected_bldNm and all_bldnms:
+        normalized_expected = {normalize_bldnm(n) for n in expected_bldNm if n}
+        other_bldnms = [b for b in all_bldnms if normalize_bldnm(b) not in normalized_expected]
+        if other_bldnms and len(other_bldnms) == len(all_bldnms):
+            hint_parts.append(
+                f"⚠️ 이 지번의 데이터는 다른 건물입니다. "
+                f"검색한 건물명({', '.join(expected_bldNm)})과 일치하지 않음. "
+                f"실제 존재하는 건물: {', '.join(all_bldnms[:5])}"
+            )
+
+    if all_bldnms:
+        hint_parts.append(f"bldNm({len(all_bldnms)}): {', '.join(all_bldnms[:5])}")
     if all_dongs:
-        hint_parts.append(f"dongNm({len(all_dongs)}): {', '.join(all_dongs[:15])}")
+        hint_parts.append(f"dongNm({len(all_dongs)}): {', '.join(all_dongs[:10])}")
     if all_hos:
         preview = ", ".join(all_hos[:30])
         more = f"... (총 {len(all_hos)}개)" if len(all_hos) > 30 else ""
@@ -503,20 +585,28 @@ def process_address(address, progress=None):
     if not juso:
         return {"주소": address, "전용면적": "", "상태": f"주소 검색 실패: {msg}"}, {"juso_debug": juso_debug}
 
+    expected_bldNm = []
+    if juso.get("bdNm"):
+        expected_bldNm.append(juso["bdNm"])
+    for n in extract_bldnm_from_parens(address):
+        if n not in expected_bldNm:
+            expected_bldNm.append(n)
+
     if progress:
         progress.write(
             f"① 매칭({juso.get('_matched_by', '-')}): {juso['jibunAddr']} "
             f"| 법정동: {juso['sigunguCd']}{juso['bjdongCd']} (alt:{juso.get('bjdongCd_alt') or '-'}) "
             f"| 지번: {juso['bun']}-{juso['ji']} "
-            f"| 도로번호: {juso.get('buldMnnm')}-{juso.get('buldSlno')} "
-            f"| 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}'"
+            f"| 동: '{target_dong or '없음'}', 호: '{target_ho or '없음'}' "
+            f"| 건물명: {expected_bldNm or '없음'}"
         )
         if juso.get("relJibun"):
             progress.caption(f"관련지번: {juso['relJibun']}")
 
     area, status, errors, api_debug = find_dedicated_area(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
-        juso["platGbCd"], target_dong, target_ho, juso=juso)
+        juso["platGbCd"], target_dong, target_ho, juso=juso,
+        expected_bldNm=expected_bldNm)
 
     debug_bundle = {"juso_debug": juso_debug, "api_debug": api_debug, "errors": errors}
     if area:
@@ -529,9 +619,8 @@ def process_address(address, progress=None):
 # ============================================================
 st.title("🏠 건축물 전용면적 조회")
 
-# ---------- 🔍 도로명주소 검색 (보조 도구) ----------
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
-    st.caption("건물명(예: 올림픽파크포레온) 또는 주소 일부(예: 양재대로 1300)를 입력하세요.")
+    st.caption("건물명(예: 청담르엘) 또는 주소 일부(예: 학동로 607)를 입력하세요.")
 
     if "search_candidates" not in st.session_state:
         st.session_state.search_candidates = []
@@ -543,9 +632,8 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
     col1, col2 = st.columns([4, 1])
     with col1:
         search_kw = st.text_input(
-            "검색어",
-            key="juso_search_kw",
-            placeholder="예: 올림픽파크포레온 / 신반포로33길 / 잠원동 157",
+            "검색어", key="juso_search_kw",
+            placeholder="예: 청담르엘 / 학동로 607 / 신반포로33길",
             label_visibility="collapsed"
         )
     with col2:
@@ -561,7 +649,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.session_state.search_error = err
             st.session_state.search_performed = True
 
-    # 세션에 저장된 결과 렌더 (검색 버튼 안 눌러도 유지됨)
     if st.session_state.search_performed:
         err = st.session_state.search_error
         candidates = st.session_state.search_candidates
@@ -613,22 +700,20 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
 
 st.markdown("---")
 
-# ---------- 플래시 메시지 ----------
 _flash = st.session_state.pop("_flash_msg", None)
 if _flash:
     st.success(_flash)
 
-# ---------- 전용면적 조회 ----------
 st.subheader("📋 전용면적 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
-           "괄호 안 추가정보(예: (둔촌동, 올림픽파크포레온))는 자동으로 무시됩니다.")
+           "괄호 안 추가정보(예: (청담동, 청담르엘))는 자동으로 무시됩니다.")
 
 addresses = []
 for i in range(10):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울특별시 강동구 양재대로 1300 429동 402호"
+        placeholder="예: 서울특별시 강남구 학동로 607 청담르엘 101동 1401호"
     )
     addresses.append(address.strip())
 
@@ -652,6 +737,8 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         else:
             if "호별 전유면적이" in result["상태"]:
                 st.info(f"ℹ️ {result['상태']}")
+            elif "다른 건물" in result["상태"]:
+                st.warning(f"⚠️ {result['상태']}")
             else:
                 st.error(f"조회 실패: {result['상태']}")
 
