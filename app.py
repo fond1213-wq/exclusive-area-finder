@@ -490,14 +490,13 @@ def find_exclusive_area(
 ):
 
     target_dong = normalize_dong(target_dong)
-
     target_ho = normalize_ho(target_ho)
 
+    # ========================================================
+    # 1. 전유부에서 대상 동/호 찾기
+    # ========================================================
 
     candidates = []
-
-
-    # 동 + 호 매칭
 
     for item in expos_items:
 
@@ -509,23 +508,19 @@ def find_exclusive_area(
             item.get("hoNm", "")
         )
 
+        # 호수 일치
+        if target_ho and item_ho != target_ho:
+            continue
 
-        if target_ho:
-
-            if item_ho != target_ho:
-                continue
-
-
-        if target_dong:
-
-            if item_dong != target_dong:
-                continue
-
+        # 동이 입력된 경우 동도 일치
+        if target_dong and item_dong != target_dong:
+            continue
 
         candidates.append(item)
 
-
-    # 동이 없으면 호만 검색
+    # ========================================================
+    # 2. 동/호로 못 찾으면 호만 다시 검색
+    # ========================================================
 
     if not candidates and target_ho:
 
@@ -539,14 +534,11 @@ def find_exclusive_area(
 
                 candidates.append(item)
 
-
     if not candidates:
 
         return None, "동/호 매칭 실패", ""
 
-
     candidate = candidates[0]
-
 
     pk = str(
         candidate.get(
@@ -554,7 +546,6 @@ def find_exclusive_area(
             ""
         )
     )
-
 
     candidate_dong = normalize_dong(
         candidate.get("dongNm", "")
@@ -565,49 +556,22 @@ def find_exclusive_area(
     )
 
 
-    area_candidates = []
+    # ========================================================
+    # 3. 전유공용면적 자료에서
+    #    먼저 동 + 호로 찾는다
+    # ========================================================
 
+    area_candidates = []
 
     for item in area_items:
 
-        item_pk = str(
-            item.get(
-                "mgmBldrgstPk",
-                ""
-            )
+        item_dong = normalize_dong(
+            item.get("dongNm", "")
         )
 
-
-        if pk and item_pk:
-
-            if item_pk != pk:
-
-                continue
-
-        else:
-
-            item_dong = normalize_dong(
-                item.get("dongNm", "")
-            )
-
-            item_ho = normalize_ho(
-                item.get("hoNm", "")
-            )
-
-
-            if candidate_dong:
-
-                if item_dong != candidate_dong:
-
-                    continue
-
-
-            if candidate_ho:
-
-                if item_ho != candidate_ho:
-
-                    continue
-
+        item_ho = normalize_ho(
+            item.get("hoNm", "")
+        )
 
         gb_cd = str(
             item.get(
@@ -615,7 +579,6 @@ def find_exclusive_area(
                 ""
             )
         ).strip()
-
 
         gb_nm = str(
             item.get(
@@ -625,18 +588,89 @@ def find_exclusive_area(
         ).strip()
 
 
-        if gb_cd == "1" or gb_nm == "전유":
+        # 전유만
+        if not (
+            gb_cd == "1"
+            or gb_nm == "전유"
+        ):
+            continue
 
-            area_candidates.append(item)
 
+        # 동/호가 모두 있으면 동 + 호 우선
+        if candidate_dong and candidate_ho:
+
+            if (
+                item_dong == candidate_dong
+                and item_ho == candidate_ho
+            ):
+
+                area_candidates.append(item)
+
+
+        # 동이 없는 주소라면 호만
+        elif candidate_ho:
+
+            if item_ho == candidate_ho:
+
+                area_candidates.append(item)
+
+
+    # ========================================================
+    # 4. 동/호 매칭 실패 시 PK로 재검색
+    # ========================================================
+
+    if not area_candidates and pk:
+
+        for item in area_items:
+
+            item_pk = str(
+                item.get(
+                    "mgmBldrgstPk",
+                    ""
+                )
+            )
+
+            gb_cd = str(
+                item.get(
+                    "exposPubuseGbCd",
+                    ""
+                )
+            ).strip()
+
+            gb_nm = str(
+                item.get(
+                    "exposPubuseGbCdNm",
+                    ""
+                )
+            ).strip()
+
+
+            if not (
+                gb_cd == "1"
+                or gb_nm == "전유"
+            ):
+                continue
+
+
+            if item_pk == pk:
+
+                area_candidates.append(item)
+
+
+    # ========================================================
+    # 5. 그래도 없으면 전유면적 자료 없음
+    # ========================================================
 
     if not area_candidates:
 
         return None, "전유면적 자료 없음", pk
 
 
-    total_area = 0
+    # ========================================================
+    # 6. 면적 합계
+    # ========================================================
 
+    total_area = 0
 
     for item in area_candidates:
 
@@ -668,6 +702,9 @@ def find_exclusive_area(
         "정상",
         pk
     )
+    
+
+    
 
 
 # ============================================================
