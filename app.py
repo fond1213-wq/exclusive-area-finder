@@ -26,6 +26,18 @@ DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=True)
 # ============================================================
 # 2. 파싱 유틸
 # ============================================================
+def clean_address_for_parsing(address):
+    """괄호 안 추가정보 제거
+    예: '... 1300 (둔촌동, 올림픽파크포레온) 429동 402호'
+        → '... 1300 429동 402호'"""
+    text = str(address).strip()
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"\s*\([^()]*\)", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 def normalize_name(s):
     if s is None:
         return ""
@@ -40,7 +52,8 @@ def is_match(target, source):
     return t.upper() == s.upper()
 
 def extract_dong_ho(address):
-    text = str(address).strip()
+    # 괄호 내용 먼저 제거
+    text = clean_address_for_parsing(address)
     dong = ho = ""
     m = re.search(r"([0-9A-Za-z]+)\s*동(?![가-힣])", text)
     if m:
@@ -64,7 +77,8 @@ def extract_road_pattern(address):
     return (m.group(1), m.group(2)) if m else (None, None)
 
 def sanitize_road_address(address):
-    text = str(address).strip()
+    # 괄호 내용 먼저 제거
+    text = clean_address_for_parsing(address)
     text = re.sub(r"\s+[0-9A-Za-z]+\s*동(?![가-힣]).*", "", text)
     text = re.sub(r"\s+\d+\s*호(?![가-힣]).*", "", text)
     road, num = extract_road_pattern(text)
@@ -143,10 +157,15 @@ def _juso_item_to_dict(j):
 
 def search_juso(address):
     all_dbg = {}
+    cleaned = clean_address_for_parsing(address)
+    sanitized = sanitize_road_address(address)
+
     candidates = [("raw", address)]
-    clean = sanitize_road_address(address)
-    if clean and clean != address:
-        candidates.append(("sanitized", clean))
+    if cleaned and cleaned != address:
+        candidates.append(("cleaned", cleaned))
+    if sanitized and sanitized not in (address, cleaned):
+        candidates.append(("sanitized", sanitized))
+
     last_msg = ""
     for label, kw in candidates:
         juso_list, msg, dbg = search_juso_single(kw)
@@ -187,8 +206,11 @@ def search_address_candidates(keyword, count=20):
     juso_list = data.get("results", {}).get("juso", [])
     results = []
     for j in juso_list:
+        full_road = j.get("roadAddr", "")
+        clean_road = clean_address_for_parsing(full_road)
         results.append({
-            "도로명주소": j.get("roadAddr", ""),
+            "도로명주소": full_road,
+            "도로명주소_깔끔": clean_road,
             "지번주소": j.get("jibunAddr", ""),
             "건물명": j.get("bdNm", ""),
             "우편번호": j.get("zipNo", ""),
@@ -505,16 +527,12 @@ def process_address(address, progress=None):
 # ============================================================
 # 7. UI
 # ============================================================
-# ============================================================
-# 7. UI
-# ============================================================
 st.title("🏠 건축물 전용면적 조회")
 
 # ---------- 🔍 도로명주소 검색 (보조 도구) ----------
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
-    st.caption("건물명(예: 동아아파트) 또는 주소 일부(예: 신반포로33길)를 입력하세요.")
+    st.caption("건물명(예: 올림픽파크포레온) 또는 주소 일부(예: 양재대로 1300)를 입력하세요.")
 
-    # 검색 결과를 세션에 유지 (이게 핵심!)
     if "search_candidates" not in st.session_state:
         st.session_state.search_candidates = []
     if "search_error" not in st.session_state:
@@ -527,7 +545,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         search_kw = st.text_input(
             "검색어",
             key="juso_search_kw",
-            placeholder="예: 동아아파트 / 신반포로33길 / 잠원동 157",
+            placeholder="예: 올림픽파크포레온 / 신반포로33길 / 잠원동 157",
             label_visibility="collapsed"
         )
     with col2:
@@ -543,7 +561,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.session_state.search_error = err
             st.session_state.search_performed = True
 
-    # ★ 세션에 저장된 결과를 매 run마다 렌더 (검색 버튼 안 눌러도 유지됨) ★
+    # 세션에 저장된 결과 렌더 (검색 버튼 안 눌러도 유지됨)
     if st.session_state.search_performed:
         err = st.session_state.search_error
         candidates = st.session_state.search_candidates
@@ -575,32 +593,42 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                             dong_preview = dong_preview[:200] + "..."
                         st.caption(f"🏠 동목록: {dong_preview}")
 
-                    if st.button(f"⬆️ 주소 {target_slot}에 넣기", key=f"use_{i}"):
-                        # ① 텍스트 인풋의 세션 값 갱신
-                        st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
-                        # ② rerun 후 표시할 플래시 메시지 저장
-                        st.session_state["_flash_msg"] = (
-                            f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소']}"
-                        )
-                        st.rerun()
+                    bcol1, bcol2 = st.columns(2)
+                    with bcol1:
+                        if st.button(f"⬆️ 주소 {target_slot}에 넣기 (원본)",
+                                     key=f"use_full_{i}", use_container_width=True):
+                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
+                            st.session_state["_flash_msg"] = (
+                                f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소']}"
+                            )
+                            st.rerun()
+                    with bcol2:
+                        if st.button(f"⬆️ 주소 {target_slot}에 넣기 (괄호 제거)",
+                                     key=f"use_clean_{i}", use_container_width=True):
+                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소_깔끔"]
+                            st.session_state["_flash_msg"] = (
+                                f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소_깔끔']}"
+                            )
+                            st.rerun()
 
 st.markdown("---")
 
-# ---------- 플래시 메시지 (rerun 후 1회만 표시) ----------
+# ---------- 플래시 메시지 ----------
 _flash = st.session_state.pop("_flash_msg", None)
 if _flash:
     st.success(_flash)
 
-# ---------- 기존 전용면적 조회 ----------
+# ---------- 전용면적 조회 ----------
 st.subheader("📋 전용면적 조회")
-st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 000동 000호)")
+st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
+           "괄호 안 추가정보(예: (둔촌동, 올림픽파크포레온))는 자동으로 무시됩니다.")
 
 addresses = []
 for i in range(10):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 000동 000호"
+        placeholder="예: 서울특별시 강동구 양재대로 1300 429동 402호"
     )
     addresses.append(address.strip())
 
