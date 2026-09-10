@@ -33,14 +33,12 @@ DEBUG = st.sidebar.checkbox("🔧 디버그 모드 (원본 API 응답 보기)", 
 # ============================================================
 
 def clean_num(val):
-    """문자열에서 숫자만 추출하여 정수형 문자열로 반환 (예: '제129동' -> '129')"""
     if not val:
         return ""
     nums = re.findall(r"\d+", str(val))
     return str(int(nums[0])) if nums else ""
 
 def is_match(target, source):
-    """동/호수 유연 비교 (예: '129' == '0129' == '제129동' == '129동')"""
     t_clean = clean_num(target)
     s_clean = clean_num(source)
     if not t_clean or not s_clean:
@@ -48,7 +46,6 @@ def is_match(target, source):
     return t_clean == s_clean
 
 def extract_dong_ho(address):
-    """주소 원문에서 동, 호수 추출"""
     text = str(address).strip()
     dong, ho = "", ""
 
@@ -74,7 +71,6 @@ def extract_dong_ho(address):
     return dong, ho
 
 def sanitize_road_address(address):
-    """도로명 + 건물번호만 추출 (동/호수, 건물명 제거)"""
     text = str(address).strip()
     text = re.sub(r"\d+\s*동.*", "", text)
     text = re.sub(r"\d+\s*호.*", "", text)
@@ -86,7 +82,7 @@ def sanitize_road_address(address):
     return text.strip()
 
 # ============================================================
-# 3. Juso API (도로명주소 -> 지번 변환)
+# 3. Juso API
 # ============================================================
 
 def search_juso_single(keyword):
@@ -168,10 +164,11 @@ def search_juso(address):
     return None, f"{msg} / 재시도: {msg2}", {"1차": dbg, "2차": dbg2}
 
 # ============================================================
-# 4. 국토부 건축물대장 API 호출
+# 4. 국토부 건축물대장 API 호출 (빈 응답 재시도 + extra_params 지원)
 # ============================================================
 
-def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_check=None):
+def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
+                       match_check=None, extra_params=None):
     url = f"{BUILDING_API_BASE}/{endpoint}"
     bun_str = str(bun).zfill(4)
     ji_str = str(ji).zfill(4)
@@ -196,15 +193,32 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
             "pageNo": str(page),
             "_type": "json",
         }
+        if extra_params:
+            params.update(extra_params)
 
         try:
-            res = requests.get(url, params=params, timeout=15)
+            res = requests.get(url, params=params, timeout=20)
+            raw_text = (res.text or "")
+
+            # data.go.kr이 가끔 빈 응답을 반환 → 1회 재시도
+            if not raw_text.strip():
+                time.sleep(1.0)
+                res = requests.get(url, params=params, timeout=20)
+                raw_text = (res.text or "")
 
             try:
                 data = res.json()
             except ValueError:
-                error_msg = f"[{endpoint}] JSON 파싱 실패 (HTTP {res.status_code}) - 서비스키 오류 가능성. 응답: {res.text[:300]}"
-                debug_snippets.append({"endpoint": endpoint, "raw_text": res.text[:500], "status_code": res.status_code})
+                error_msg = (
+                    f"[{endpoint}] JSON 파싱 실패 (HTTP {res.status_code}, "
+                    f"빈응답={not raw_text.strip()}) 응답: {raw_text[:300]}"
+                )
+                debug_snippets.append({
+                    "endpoint": endpoint,
+                    "status_code": res.status_code,
+                    "raw_text": raw_text[:500],
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"},
+                })
                 break
 
             header = data.get("response", {}).get("header", {})
@@ -213,14 +227,23 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
 
             if result_code not in ("00", "0", ""):
                 error_msg = f"[{endpoint}] API 오류 [{result_code}] {result_msg}"
-                debug_snippets.append({"endpoint": endpoint, "header": header})
+                debug_snippets.append({
+                    "endpoint": endpoint,
+                    "header": header,
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"},
+                })
                 break
 
             body = data.get("response", {}).get("body", {})
             items = body.get("items", {})
 
             if page == 1:
-                debug_snippets.append({"endpoint": endpoint, "totalCount": body.get("totalCount", 0), "sample": items})
+                debug_snippets.append({
+                    "endpoint": endpoint,
+                    "totalCount": body.get("totalCount", 0),
+                    "sample": items,
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"},
+                })
 
             if not items:
                 break
@@ -248,10 +271,11 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
                 if page >= MAX_PAGES and len(all_items) < total_count:
                     error_msg = (
                         f"[{endpoint}] 안전 상한({MAX_PAGES * ROWS_PER_PAGE}건)까지 조회했으나 "
-                        f"전체 {total_count}건 중 일부만 확인했습니다. (초대형 단지)"
+                        f"전체 {total_count}건 중 일부만 확인했습니다."
                     )
                 break
             page += 1
+            time.sleep(0.15)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"[{endpoint}] 요청 실패: {e}"
@@ -260,7 +284,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_c
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 전용면적 정밀 매칭 엔진 (오매칭 방지 강화판)
+# 5. 전용면적 매칭 엔진 (전유공용면적 API 파라미터 다중 시도)
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_dong, target_ho):
@@ -268,19 +292,17 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     if ji != "0":
         ji_variants.append("0")
 
-    plat_gb_candidates = [plat_gb_cd_hint] + [c for c in ["0", "1"] if c != plat_gb_cd_hint]
+    plat_gb_candidates = [plat_gb_cd_hint] + [c for c in ["0", "1", "2"] if c != plat_gb_cd_hint]
 
     all_errors = []
     all_debug = []
 
     def _is_exclusive(item):
-        """전유 항목 여부 (코드 '1' 우선, 명칭은 보조)"""
         gb_cd = str(item.get("exposPubuseGbCd", "")).strip()
         gb_nm = str(item.get("exposPubuseGbCdNm", "")).strip()
         return gb_cd == "1" or ("전유" in gb_nm and "공용" not in gb_nm)
 
     def _safe_area(item):
-        """면적 파싱 + 상식적 범위(5~500㎡) 검증"""
         try:
             v = float(str(item.get("area", "0")).replace(",", ""))
             if 5.0 <= v <= 500.0:
@@ -289,7 +311,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
             pass
         return None
 
-    # 전유공용면적 API용 match_check (전유 필터 포함 -> 공용에서 조기종료 방지)
     def _check_pubuse(item):
         if not _is_exclusive(item):
             return False
@@ -299,65 +320,51 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
             return is_match(target_ho, item.get("hoNm", ""))
         return False
 
-    # 전유부 API용 match_check
-    def _check_expos(item):
-        if target_dong and target_ho:
-            return is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", ""))
-        if target_ho:
-            return is_match(target_ho, item.get("hoNm", ""))
-        return False
+    # ★ 전유공용면적 API에 시도해볼 dongNm/hoNm 조합들 ★
+    #   이 API는 dongNm/hoNm을 붙여야 결과가 나오는 건물이 있음.
+    extra_param_sets = [None]
+    if target_dong and target_ho:
+        extra_param_sets.append({"dongNm": target_dong, "hoNm": target_ho})
+        extra_param_sets.append({"dongNm": f"{target_dong}동", "hoNm": f"{target_ho}호"})
+        extra_param_sets.append({"dongNm": f"{int(target_dong):04d}동", "hoNm": target_ho})
+    elif target_ho:
+        extra_param_sets.append({"hoNm": target_ho})
+        extra_param_sets.append({"hoNm": f"{target_ho}호"})
 
     for current_ji in ji_variants:
         for platGbCd in plat_gb_candidates:
+            # 1) 전유공용면적 API (여러 파라미터 조합 시도)
+            for extra in extra_param_sets:
+                area_list, err1, dbg1 = call_api_all_pages(
+                    "getBrExposPubuseAreaInfo",
+                    sigunguCd, bjdongCd, platGbCd, bun, current_ji,
+                    match_check=_check_pubuse,
+                    extra_params=extra,
+                )
+                if err1:
+                    all_errors.append(err1)
+                all_debug.extend(dbg1)
 
-            # 1) 전유공용면적 API
-            area_list, err1, dbg1 = call_api_all_pages(
-                "getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
-                match_check=_check_pubuse,
-            )
-            if err1:
-                all_errors.append(err1)
-            all_debug.extend(dbg1)
+                if target_dong and target_ho:
+                    for a in area_list:
+                        if not _is_exclusive(a):
+                            continue
+                        if is_match(target_dong, a.get("dongNm", "")) and is_match(target_ho, a.get("hoNm", "")):
+                            val = _safe_area(a)
+                            if val is not None:
+                                return val, "조회 성공", all_errors, all_debug
+                elif target_ho:
+                    for a in area_list:
+                        if not _is_exclusive(a):
+                            continue
+                        if is_match(target_ho, a.get("hoNm", "")):
+                            val = _safe_area(a)
+                            if val is not None:
+                                return val, "조회 성공 (호수 기준)", all_errors, all_debug
 
-            if target_dong and target_ho:
-                for a in area_list:
-                    if not _is_exclusive(a):
-                        continue
-                    if is_match(target_dong, a.get("dongNm", "")) and is_match(target_ho, a.get("hoNm", "")):
-                        val = _safe_area(a)
-                        if val is not None:
-                            return val, "조회 성공", all_errors, all_debug
-                # 동이 명시됐는데 못 찾으면 호수만으로 폴백하지 않는다 (오매칭 방지)
-            elif target_ho:
-                for a in area_list:
-                    if not _is_exclusive(a):
-                        continue
-                    if is_match(target_ho, a.get("hoNm", "")):
-                        val = _safe_area(a)
-                        if val is not None:
-                            return val, "조회 성공 (호수 기준)", all_errors, all_debug
-
-            # 2) 전유부 API (보조 수단)
-            expos_list, err2, dbg2 = call_api_all_pages(
-                "getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
-                match_check=_check_expos,
-            )
-            if err2:
-                all_errors.append(err2)
-            all_debug.extend(dbg2)
-
-            if target_dong and target_ho:
-                for item in expos_list:
-                    if is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", "")):
-                        val = _safe_area(item)
-                        if val is not None:
-                            return val, "조회 성공 (전유부 기준)", all_errors, all_debug
-            elif target_ho:
-                for item in expos_list:
-                    if is_match(target_ho, item.get("hoNm", "")):
-                        val = _safe_area(item)
-                        if val is not None:
-                            return val, "조회 성공 (전유부 호수 기준)", all_errors, all_debug
+                # 결과가 있었다면 이 platGbCd/ji에 대해 더 이상 파라미터 변형은 시도 안 함
+                if area_list:
+                    break
 
     status = "동/호 전유면적 매칭 실패"
     if all_errors:
