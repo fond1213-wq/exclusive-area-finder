@@ -6,30 +6,26 @@ from urllib.parse import unquote
 
 
 # ============================================================
-# 기본 설정
+# 1. 기본 설정
 # ============================================================
 
 st.set_page_config(
     page_title="전용면적 조회",
-    page_icon="🏢",
-    layout="centered"
+    page_icon="🏠",
+    layout="wide"
 )
-
-st.title("🏢 건축물 전용면적 조회")
-st.write("주소와 동·호수가 포함된 주소를 최대 10개까지 입력하세요.")
 
 
 # ============================================================
-# API KEY
+# 2. API KEY
 # ============================================================
 
-BUILDING_API_KEY = unquote(
-    st.secrets["BUILDING_API_KEY"]
-)
+BUILDING_API_KEY = st.secrets["BUILDING_API_KEY"]
+JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
-JUSO_API_KEY = unquote(
-    st.secrets["JUSO_API_KEY"]
-)
+BUILDING_API_KEY = unquote(BUILDING_API_KEY)
+JUSO_API_KEY = unquote(JUSO_API_KEY)
+
 
 BUILDING_API_BASE = (
     "https://apis.data.go.kr/1613000/BldRgstHubService"
@@ -41,10 +37,11 @@ JUSO_API_URL = (
 
 
 # ============================================================
-# 문자열 정리
+# 3. 문자열 정리
 # ============================================================
 
 def normalize_text(value):
+
     if value is None:
         return ""
 
@@ -56,6 +53,7 @@ def normalize_text(value):
 
 
 def normalize_dong(value):
+
     value = normalize_text(value)
 
     if not value:
@@ -68,6 +66,7 @@ def normalize_dong(value):
 
 
 def normalize_ho(value):
+
     value = normalize_text(value)
 
     if not value:
@@ -79,7 +78,7 @@ def normalize_ho(value):
 
 
 # ============================================================
-# 주소에서 동 / 호수 추출
+# 4. 주소에서 동 / 호 추출
 # ============================================================
 
 def extract_dong_ho(address):
@@ -97,12 +96,14 @@ def extract_dong_ho(address):
     )
 
     if m:
+
         dong = m.group(1)
         ho = m.group(2)
 
         text = text[:m.start()].strip()
 
         return text, dong, ho
+
 
     # 101동1203호
     m = re.search(
@@ -112,12 +113,14 @@ def extract_dong_ho(address):
     )
 
     if m:
+
         dong = m.group(1)
         ho = m.group(2)
 
         text = text[:m.start()].strip()
 
         return text, dong, ho
+
 
     # 1203호
     m = re.search(
@@ -127,49 +130,63 @@ def extract_dong_ho(address):
     )
 
     if m:
+
         ho = m.group(1)
 
         text = text[:m.start()].strip()
 
-        return text, dong, ho
+        return text, "", ho
 
-    # 건물명 뒤에 호수만 있는 경우
-    # 예: 일성트루엘오피스텔 715
+
+    # 마지막 숫자를 호수로 간주
+    # 예: 일성트루엘 715
     m = re.search(
         r"\s(\d{2,5})\s*$",
         text
     )
 
     if m:
+
         ho = m.group(1)
+
         text = text[:m.start()].strip()
+
 
     return text, dong, ho
 
 
 # ============================================================
-# Juso 주소 검색
+# 5. Juso 주소 검색
 # ============================================================
 
 def search_juso(address):
 
     params = {
+
         "confmKey": JUSO_API_KEY,
+
         "currentPage": 1,
+
         "countPerPage": 10,
+
         "keyword": address,
+
         "hstryYn": "N",
+
         "firstSort": "none",
+
         "addInfoYn": "Y",
+
         "resultType": "json"
     }
+
 
     try:
 
         response = requests.get(
             JUSO_API_URL,
             params=params,
-            timeout=15
+            timeout=10
         )
 
         response.raise_for_status()
@@ -182,6 +199,7 @@ def search_juso(address):
             .get("common", {})
         )
 
+
         if common.get("errorCode") != "0":
 
             return None, (
@@ -189,17 +207,23 @@ def search_juso(address):
                 + str(common.get("errorMessage", ""))
             )
 
+
         juso_list = (
             data
             .get("results", {})
             .get("juso", [])
         )
 
+
         if not juso_list:
 
             return None, "도로명주소 검색 결과 없음"
 
+
         j = juso_list[0]
+
+
+        # 법정동코드
 
         admCd = j.get("admCd", "")
 
@@ -207,48 +231,72 @@ def search_juso(address):
 
             return None, "법정동코드 확인 실패"
 
+
         sigunguCd = admCd[:5]
+
         bjdongCd = admCd[5:10]
+
+
+        # 지번
 
         jibunAddr = j.get("jibunAddr", "")
 
-        # 지번주소 중 숫자 부분 추출
-        # 예:
-        # 서울특별시 관악구 신림동 1523-1 일성트루엘
-        # → 1523 / 1
 
         jibun_match = re.search(
             r"\s(\d+)(?:-(\d+))?(?:\s|$)",
             jibunAddr
         )
 
+
         if jibun_match:
 
             bun = jibun_match.group(1)
-            ji = jibun_match.group(2) or "0"
+
+            ji = (
+                jibun_match.group(2)
+                or "0"
+            )
 
         else:
 
-            return None, "지번 추출 실패"
+            bun = ""
+
+            ji = "0"
+
 
         return {
+
             "sigunguCd": sigunguCd,
+
             "bjdongCd": bjdongCd,
+
             "bun": bun.zfill(4),
+
             "ji": ji.zfill(4),
+
             "roadAddr": j.get("roadAddr", ""),
+
             "jibunAddr": jibunAddr,
+
             "bdNm": j.get("bdNm", ""),
+
             "admCd": admCd
+
         }, "정상"
+
+
+    except requests.exceptions.Timeout:
+
+        return None, "주소 API 시간 초과"
+
 
     except Exception as e:
 
-        return None, f"주소 API 통신 오류: {e}"
+        return None, f"주소 API 오류: {e}"
 
 
 # ============================================================
-# 건축물대장 전유부
+# 6. 건축물대장 전유부
 # ============================================================
 
 def get_expos_info(
@@ -264,74 +312,80 @@ def get_expos_info(
         + "/getBrExposInfo"
     )
 
-    all_items = []
 
-    page_no = 1
-    num_rows = 100
+    params = {
 
-    while True:
+        "serviceKey": BUILDING_API_KEY,
 
-        params = {
-            "serviceKey": BUILDING_API_KEY,
-            "sigunguCd": sigunguCd,
-            "bjdongCd": bjdongCd,
-            "platGbCd": platGbCd,
-            "bun": bun,
-            "ji": ji,
-            "pageNo": page_no,
-            "numOfRows": num_rows,
-            "_type": "json"
-        }
+        "sigunguCd": sigunguCd,
 
-        try:
+        "bjdongCd": bjdongCd,
 
-            response = requests.get(
-                url,
-                params=params,
-                timeout=20
-            )
+        "platGbCd": platGbCd,
 
-            response.raise_for_status()
+        "bun": bun,
 
-            data = response.json()
+        "ji": ji,
 
-            body = (
-                data
-                .get("response", {})
-                .get("body", {})
-            )
+        "pageNo": 1,
 
-            total_count = int(
-                body.get("totalCount", 0)
-            )
+        "numOfRows": 100,
 
-            items = (
-                body
-                .get("items", {})
-                .get("item", [])
-            )
+        "_type": "json"
+    }
 
-            if isinstance(items, dict):
-                items = [items]
 
-            all_items.extend(items)
+    try:
 
-            if not items:
-                break
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
 
-            if len(all_items) >= total_count:
-                break
+        response.raise_for_status()
 
-            page_no += 1
+        data = response.json()
 
-        except Exception:
-            break
 
-    return all_items
+        body = (
+            data
+            .get("response", {})
+            .get("body", {})
+        )
+
+
+        items = (
+            body
+            .get("items", {})
+            .get("item", [])
+        )
+
+
+        if isinstance(items, dict):
+
+            items = [items]
+
+
+        return items
+
+
+    except requests.exceptions.Timeout:
+
+        raise Exception(
+            "건축물대장 전유부 API 시간 초과"
+        )
+
+
+    except Exception as e:
+
+        raise Exception(
+            f"건축물대장 전유부 API 오류: {e}"
+        )
 
 
 # ============================================================
-# 전유공용면적
+# 7. 전유공용면적
 # ============================================================
 
 def get_area_info(
@@ -347,74 +401,80 @@ def get_area_info(
         + "/getBrExposPubuseAreaInfo"
     )
 
-    all_items = []
 
-    page_no = 1
-    num_rows = 100
+    params = {
 
-    while True:
+        "serviceKey": BUILDING_API_KEY,
 
-        params = {
-            "serviceKey": BUILDING_API_KEY,
-            "sigunguCd": sigunguCd,
-            "bjdongCd": bjdongCd,
-            "platGbCd": platGbCd,
-            "bun": bun,
-            "ji": ji,
-            "pageNo": page_no,
-            "numOfRows": num_rows,
-            "_type": "json"
-        }
+        "sigunguCd": sigunguCd,
 
-        try:
+        "bjdongCd": bjdongCd,
 
-            response = requests.get(
-                url,
-                params=params,
-                timeout=20
-            )
+        "platGbCd": platGbCd,
 
-            response.raise_for_status()
+        "bun": bun,
 
-            data = response.json()
+        "ji": ji,
 
-            body = (
-                data
-                .get("response", {})
-                .get("body", {})
-            )
+        "pageNo": 1,
 
-            total_count = int(
-                body.get("totalCount", 0)
-            )
+        "numOfRows": 100,
 
-            items = (
-                body
-                .get("items", {})
-                .get("item", [])
-            )
+        "_type": "json"
+    }
 
-            if isinstance(items, dict):
-                items = [items]
 
-            all_items.extend(items)
+    try:
 
-            if not items:
-                break
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
 
-            if len(all_items) >= total_count:
-                break
+        response.raise_for_status()
 
-            page_no += 1
+        data = response.json()
 
-        except Exception:
-            break
 
-    return all_items
+        body = (
+            data
+            .get("response", {})
+            .get("body", {})
+        )
+
+
+        items = (
+            body
+            .get("items", {})
+            .get("item", [])
+        )
+
+
+        if isinstance(items, dict):
+
+            items = [items]
+
+
+        return items
+
+
+    except requests.exceptions.Timeout:
+
+        raise Exception(
+            "전유공용면적 API 시간 초과"
+        )
+
+
+    except Exception as e:
+
+        raise Exception(
+            f"전유공용면적 API 오류: {e}"
+        )
 
 
 # ============================================================
-# 전용면적 찾기
+# 8. 전용면적 매칭
 # ============================================================
 
 def find_exclusive_area(
@@ -425,13 +485,14 @@ def find_exclusive_area(
 ):
 
     target_dong = normalize_dong(target_dong)
+
     target_ho = normalize_ho(target_ho)
+
 
     candidates = []
 
-    # --------------------------------------------------------
+
     # 동 + 호 매칭
-    # --------------------------------------------------------
 
     for item in expos_items:
 
@@ -443,19 +504,23 @@ def find_exclusive_area(
             item.get("hoNm", "")
         )
 
-        if target_ho and item_ho != target_ho:
-            continue
+
+        if target_ho:
+
+            if item_ho != target_ho:
+                continue
+
 
         if target_dong:
 
             if item_dong != target_dong:
                 continue
 
+
         candidates.append(item)
 
-    # --------------------------------------------------------
-    # 동이 없는 경우 호수만으로 재검색
-    # --------------------------------------------------------
+
+    # 동이 없으면 호만 검색
 
     if not candidates and target_ho:
 
@@ -466,17 +531,17 @@ def find_exclusive_area(
             )
 
             if item_ho == target_ho:
+
                 candidates.append(item)
+
 
     if not candidates:
 
-        return None, None, "전유부에서 동/호 매칭 실패"
+        return None, "동/호 매칭 실패", ""
 
-    # --------------------------------------------------------
-    # 첫 번째 후보
-    # --------------------------------------------------------
 
     candidate = candidates[0]
+
 
     pk = str(
         candidate.get(
@@ -485,21 +550,18 @@ def find_exclusive_area(
         )
     )
 
-    matched_dong = candidate.get(
-        "dongNm",
-        ""
+
+    candidate_dong = normalize_dong(
+        candidate.get("dongNm", "")
     )
 
-    matched_ho = candidate.get(
-        "hoNm",
-        ""
+    candidate_ho = normalize_ho(
+        candidate.get("hoNm", "")
     )
 
-    # --------------------------------------------------------
-    # 면적자료에서 전유만 찾기
-    # --------------------------------------------------------
 
     area_candidates = []
+
 
     for item in area_items:
 
@@ -510,9 +572,11 @@ def find_exclusive_area(
             )
         )
 
+
         if pk and item_pk:
 
             if item_pk != pk:
+
                 continue
 
         else:
@@ -525,20 +589,20 @@ def find_exclusive_area(
                 item.get("hoNm", "")
             )
 
-            if target_dong:
-                if item_dong != target_dong:
+
+            if candidate_dong:
+
+                if item_dong != candidate_dong:
+
                     continue
 
-            if target_ho:
-                if item_ho != target_ho:
+
+            if candidate_ho:
+
+                if item_ho != candidate_ho:
+
                     continue
 
-        gb = str(
-            item.get(
-                "exposPubuseGbCdNm",
-                ""
-            )
-        ).strip()
 
         gb_cd = str(
             item.get(
@@ -547,19 +611,27 @@ def find_exclusive_area(
             )
         ).strip()
 
-        if gb == "전유" or gb_cd == "1":
+
+        gb_nm = str(
+            item.get(
+                "exposPubuseGbCdNm",
+                ""
+            )
+        ).strip()
+
+
+        if gb_cd == "1" or gb_nm == "전유":
 
             area_candidates.append(item)
 
+
     if not area_candidates:
 
-        return (
-            None,
-            pk,
-            "전유공용면적에서 전유 항목 없음"
-        )
+        return None, "전유면적 자료 없음", pk
+
 
     total_area = 0
+
 
     for item in area_candidates:
 
@@ -576,113 +648,115 @@ def find_exclusive_area(
 
             total_area += area
 
-        except Exception:
+        except:
+
             pass
+
 
     if total_area <= 0:
 
-        return (
-            None,
-            pk,
-            "전용면적 값 없음"
-        )
+        return None, "전용면적 값 없음", pk
+
 
     return (
         round(total_area, 2),
-        pk,
-        "정상"
+        "정상",
+        pk
     )
 
 
 # ============================================================
-# 주소 하나 조회
+# 9. 한 주소 조회
 # ============================================================
 
-def process_address(address):
+def process_address(address, progress=None):
 
-    original = address.strip()
+    address = str(address).strip()
 
-    if not original:
+
+    if not address:
 
         return {
             "주소": "",
-            "건물명": "",
-            "동": "",
-            "호": "",
             "전용면적": "",
-            "평": "",
-            "조회상태": "주소 없음"
+            "상태": "주소 없음"
         }
 
-    # --------------------------------------------------------
-    # 동 / 호 분리
-    # --------------------------------------------------------
 
-    base_address, target_dong, target_ho = (
-        extract_dong_ho(original)
-    )
+    try:
 
-    # --------------------------------------------------------
-    # Juso 검색용 도로명주소 추출
-    # --------------------------------------------------------
+        # -------------------------
+        # 동 / 호 분리
+        # -------------------------
 
-    # 예:
-    # 서울특별시 관악구 신림로23길 16 일성트루엘
-    #
-    # →
-    # 서울특별시 관악구 신림로23길 16
+        base_address, target_dong, target_ho = (
+            extract_dong_ho(address)
+        )
 
-    m = re.match(
-        r"^(.+\s+\d+(?:-\d+)?)\s+",
-        base_address
-    )
 
-    if m:
+        if progress:
 
-        juso_search_address = m.group(1).strip()
+            progress.write(
+                f"① 주소정보 검색 중: {base_address}"
+            )
 
-    else:
 
-        juso_search_address = base_address
+        # 도로명주소만 추출
 
-    # --------------------------------------------------------
-    # Juso
-    # --------------------------------------------------------
+        m = re.search(
+            r"^(.+\s+\d+(?:-\d+)?)\s+",
+            base_address
+        )
 
-    juso, msg = search_juso(
-        juso_search_address
-    )
 
-    if juso is None:
+        if m:
 
-        return {
-            "주소": original,
-            "건물명": "",
-            "동": target_dong,
-            "호": target_ho,
-            "전용면적": "",
-            "평": "",
-            "조회상태": msg
-        }
+            juso_search_address = m.group(1)
 
-    # --------------------------------------------------------
-    # 건축물대장
-    # --------------------------------------------------------
+        else:
 
-    platGbCd = "0"
+            juso_search_address = base_address
 
-    expos_items = get_expos_info(
-        juso["sigunguCd"],
-        juso["bjdongCd"],
-        platGbCd,
-        juso["bun"],
-        juso["ji"]
-    )
 
-    # 산번지 재검색
-    if not expos_items:
+        # -------------------------
+        # Juso
+        # -------------------------
 
-        platGbCd = "1"
+        juso, msg = search_juso(
+            juso_search_address
+        )
+
+
+        if juso is None:
+
+            return {
+                "주소": address,
+                "전용면적": "",
+                "상태": msg
+            }
+
+
+        if progress:
+
+            progress.write(
+                f"② 주소 확인 완료: "
+                f"{juso['roadAddr']}"
+            )
+
+
+        # -------------------------
+        # 건축물대장
+        # -------------------------
+
+        if progress:
+
+            progress.write(
+                "③ 건축물대장 전유부 조회 중..."
+            )
+
+
+        platGbCd = "0"
+
 
         expos_items = get_expos_info(
             juso["sigunguCd"],
@@ -692,202 +766,257 @@ def process_address(address):
             juso["ji"]
         )
 
-    if not expos_items:
 
-        return {
-            "주소": original,
-            "건물명": juso["bdNm"],
-            "동": target_dong,
-            "호": target_ho,
-            "전용면적": "",
-            "평": "",
-            "조회상태": "건축물대장 전유부 조회 결과 없음"
-        }
+        # 산번지
 
-    # --------------------------------------------------------
-    # 전유공용면적
-    # --------------------------------------------------------
+        if not expos_items:
 
-    area_items = get_area_info(
-        juso["sigunguCd"],
-        juso["bjdongCd"],
-        platGbCd,
-        juso["bun"],
-        juso["ji"]
-    )
+            platGbCd = "1"
 
-    if not area_items:
 
-        return {
-            "주소": original,
-            "건물명": juso["bdNm"],
-            "동": target_dong,
-            "호": target_ho,
-            "전용면적": "",
-            "평": "",
-            "조회상태": "전유공용면적 조회 결과 없음"
-        }
+            expos_items = get_expos_info(
+                juso["sigunguCd"],
+                juso["bjdongCd"],
+                platGbCd,
+                juso["bun"],
+                juso["ji"]
+            )
 
-    # --------------------------------------------------------
-    # 면적 매칭
-    # --------------------------------------------------------
 
-    area, pk, status = find_exclusive_area(
-        expos_items,
-        area_items,
-        target_dong,
-        target_ho
-    )
+        if not expos_items:
 
-    pyeong = ""
+            return {
+                "주소": address,
+                "전용면적": "",
+                "상태": "건축물대장 전유부 없음"
+            }
 
-    if area is not None:
 
-        pyeong = round(
-            area / 3.305785,
-            2
+        if progress:
+
+            progress.write(
+                "④ 전유부 확인 완료"
+            )
+
+
+        # -------------------------
+        # 면적
+        # -------------------------
+
+        if progress:
+
+            progress.write(
+                "⑤ 전유공용면적 조회 중..."
+            )
+
+
+        area_items = get_area_info(
+            juso["sigunguCd"],
+            juso["bjdongCd"],
+            platGbCd,
+            juso["bun"],
+            juso["ji"]
         )
 
-    return {
-        "주소": original,
-        "건물명": juso["bdNm"],
-        "동": target_dong,
-        "호": target_ho,
-        "전용면적": area if area is not None else "",
-        "평": pyeong,
-        "조회상태": status
-    }
+
+        if not area_items:
+
+            return {
+                "주소": address,
+                "전용면적": "",
+                "상태": "전유공용면적 없음"
+            }
+
+
+        area, status, pk = find_exclusive_area(
+            expos_items,
+            area_items,
+            target_dong,
+            target_ho
+        )
+
+
+        if area is None:
+
+            return {
+                "주소": address,
+                "전용면적": "",
+                "상태": status
+            }
+
+
+        return {
+            "주소": address,
+            "전용면적": f"{area:.2f}㎡",
+            "상태": "조회 성공"
+        }
+
+
+    except Exception as e:
+
+        return {
+            "주소": address,
+            "전용면적": "",
+            "상태": str(e)
+        }
 
 
 # ============================================================
-# 화면
+# 10. 화면
 # ============================================================
 
-st.subheader("주소 입력")
+st.title("🏠 건축물 전용면적 조회")
 
-st.caption(
-    "예: 서울특별시 관악구 신림로23길 16 일성트루엘 715호"
+st.write(
+    "주소를 최대 10개 입력하면 "
+    "건축물대장 기준 전용면적을 조회합니다."
 )
 
-address_text = st.text_area(
-    "주소를 한 줄에 하나씩 입력하세요.",
-    height=250,
-    placeholder=(
-        "서울특별시 관악구 신림로23길 16 일성트루엘 715호\n"
-        "서울특별시 ○○구 ○○로 10 101동 1203호\n"
-        "서울특별시 ○○구 ○○로 20 ○○오피스텔 805호"
+
+st.info(
+    "예: 서울특별시 관악구 신림로23길 16 "
+    "일성트루엘 715"
+)
+
+
+# ============================================================
+# 11. 주소 입력 10개
+# ============================================================
+
+addresses = []
+
+
+for i in range(10):
+
+    address = st.text_input(
+        f"주소 {i + 1}",
+        key=f"address_{i}",
+        placeholder="도로명주소 + 건물명 + 동/호수"
     )
-)
 
-st.caption("최대 10개까지 조회할 수 있습니다.")
+    addresses.append(address.strip())
 
 
 # ============================================================
-# 조회 버튼
+# 12. 조회 버튼
 # ============================================================
 
 if st.button(
-    "🔍 전용면적 조회",
+    "🔎 전용면적 조회",
     type="primary",
     use_container_width=True
 ):
 
-    addresses = [
-        x.strip()
-        for x in address_text.splitlines()
-        if x.strip()
+    targets = [
+        x for x in addresses
+        if x
     ]
 
-    if not addresses:
+
+    if not targets:
 
         st.warning(
-            "주소를 한 개 이상 입력해주세요."
+            "주소를 하나 이상 입력해주세요."
         )
 
-    elif len(addresses) > 10:
+        st.stop()
+
+
+    if len(targets) > 10:
 
         st.error(
-            "한 번에 최대 10개까지만 조회할 수 있습니다."
+            "최대 10개까지 조회할 수 있습니다."
         )
 
-    else:
+        st.stop()
 
-        results = []
 
-        progress = st.progress(0)
+    st.markdown("---")
 
-        status_text = st.empty()
+    st.subheader(
+        f"조회 중... {len(targets)}개 주소"
+    )
 
-        for i, address in enumerate(addresses):
 
-            status_text.write(
-                f"{i + 1}/{len(addresses)} "
-                f"조회 중: {address}"
+    results = []
+
+
+    for idx, address in enumerate(
+        targets,
+        start=1
+    ):
+
+        st.markdown(
+            f"### {idx}. {address}"
+        )
+
+
+        progress_box = st.empty()
+
+
+        result = process_address(
+            address,
+            progress_box
+        )
+
+
+        results.append(result)
+
+
+        if result["전용면적"]:
+
+            st.success(
+                f"전용면적: "
+                f"{result['전용면적']}"
             )
 
-            result = process_address(address)
+        else:
 
-            results.append(result)
-
-            progress.progress(
-                (i + 1) / len(addresses)
+            st.error(
+                f"조회 실패: "
+                f"{result['상태']}"
             )
 
-            # API 과도한 호출 방지
-            time.sleep(0.3)
 
-        status_text.empty()
+        time.sleep(0.2)
 
-        progress.empty()
 
-        st.success(
-            f"{len(results)}개 주소 조회가 완료되었습니다."
-        )
+    # ========================================================
+    # 결과표
+    # ========================================================
 
-        # ----------------------------------------------------
-        # 결과표
-        # ----------------------------------------------------
+    st.markdown("---")
 
-        result_df = st.session_state.get(
-            "result_df",
-            None
-        )
+    st.subheader("📋 조회 결과")
 
-        import pandas as pd
 
-        result_df = pd.DataFrame(results)
+    st.dataframe(
+        results,
+        use_container_width=True,
+        hide_index=True
+    )
 
-        st.subheader("조회 결과")
 
-        st.dataframe(
-            result_df[
-                [
-                    "주소",
-                    "건물명",
-                    "동",
-                    "호",
-                    "전용면적",
-                    "평",
-                    "조회상태"
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True
-        )
+    # ========================================================
+    # CSV 다운로드
+    # ========================================================
 
-        # ----------------------------------------------------
-        # CSV 다운로드
-        # ----------------------------------------------------
+    import pandas as pd
 
-        csv_data = result_df.to_csv(
-            index=False,
-            encoding="utf-8-sig"
-        )
 
-        st.download_button(
-            "📥 결과 CSV 다운로드",
-            data=csv_data,
-            file_name="전용면적_조회결과.csv",
-            mime="text/csv",
-            use_container_width=True
+    result_df = pd.DataFrame(results)
+
+
+    csv_data = result_df.to_csv(
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+
+    st.download_button(
+        "📥 결과 CSV 다운로드",
+        data=csv_data,
+        file_name="전용면적_조회결과.csv",
+        mime="text/csv",
+        use_container_width=True
         )
