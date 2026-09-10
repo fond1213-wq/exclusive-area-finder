@@ -31,7 +31,7 @@ JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 # ============================================================
 
 def clean_num(val):
-    """문자열에서 숫자만 추출하여 정수형 문자열로 반환 (예: '0129동' -> '129')"""
+    """문자열에서 숫자만 추출하여 정수형 문자열로 반환 (예: '제129동' -> '129')"""
     if not val:
         return ""
     nums = re.findall(r"\d+", str(val))
@@ -69,18 +69,17 @@ def extract_dong_ho(address):
 
 def sanitize_road_address(address):
     """
-    도로명 + 건물번호만 정확하게 잘라냄 (건물명, 동/호수 완벽 제거)
-    예: '서울특별시 서초구 신반포로33길 15 동아아파트 103동 701호' -> '신반포로33길 15'
+    '신반포로33길 15' 처럼 도로명+건물번호만 잘라냄 (아파트명, 동/호수 완벽 제거)
     """
     text = str(address).strip()
     
-    # 1. 동/호수 및 아파트 단지명 표기 제거
+    # 동/호수 및 아파트 단지명 이후 문구 제거
     text = re.sub(r"\d+\s*동.*", "", text)
     text = re.sub(r"\d+\s*호.*", "", text)
     text = re.sub(r"\d+-\d+.*", "", text)
     
-    # 2. 도로명 + 본번(-부번) 패턴 정밀 추출
-    m = re.search(r"([가-힣\s0-9]+(?:로|길|대로)\s*\d+(?:-\d+)?)", text)
+    # '도로명 + 건물번호' 정밀 패턴 추출 (예: 신반포로33길 15, 왕십리로 410)
+    m = re.search(r"([가-힣A-Za-z0-9\s]+(?:로|길|대로)\s*\d+(?:-\d+)?)", text)
     if m:
         return m.group(1).strip()
     
@@ -131,13 +130,13 @@ def search_juso_single(keyword):
     return None
 
 def search_juso(address):
-    # 1차: 도로명 + 건물번호로 정제된 주소로 검색 (정확도 최고)
+    # 1차: 정제된 도로명 + 건물번호로 검색
     clean_addr = sanitize_road_address(address)
     res = search_juso_single(clean_addr)
     if res:
         return res, "정상"
 
-    # 2차: 정제 실패 시 원본 입력 주소 전체로 재시도
+    # 2차: 실패 시 입력 원문 전체로 재시도
     res = search_juso_single(address)
     if res:
         return res, "정상"
@@ -145,7 +144,7 @@ def search_juso(address):
     return None, "도로명주소 검색 결과 없음"
 
 # ============================================================
-# 4. 국토부 건축물대장 API 호출 (페이지네이션 지원)
+# 4. 국토부 건축물대장 API 호출 (페이지네이션 전수조회)
 # ============================================================
 
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
@@ -156,7 +155,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
     all_items = []
     page = 1
 
-    while page <= 5:  # 최대 5,000건 탐색
+    while page <= 10:  # 최대 10,000건 전수 탐색
         params = {
             "serviceKey": BUILDING_API_KEY_DECODED,
             "sigunguCd": sigunguCd,
@@ -198,14 +197,13 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
     return all_items
 
 # ============================================================
-# 5. 전용면적 강력 매칭 엔진 (동/호 다중 비교)
+# 5. 전용면적 정밀 매칭 엔진 (동/호 유연한 비교)
 # ============================================================
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
     t_dong_num = clean_num(target_dong)
     t_ho_num = clean_num(target_ho)
 
-    # 지번 시도 조합 (기본 지번 -> 부번 0으로 변경 시도)
     ji_variants = [ji]
     if ji != "0":
         ji_variants.append("0")
@@ -216,7 +214,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
             area_list = call_api_all_pages("getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
             
             if area_list:
-                # 1차 탐색: 동 + 호수가 모두 완벽히 일치하는 경우
+                # 1단계: 동 + 호 일치
                 if t_dong_num and t_ho_num:
                     for a in area_list:
                         i_dong = clean_num(a.get("dongNm", ""))
@@ -232,7 +230,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
                             except ValueError:
                                 pass
 
-                # 2차 탐색: 호수만 일치하는 경우 (동이 명시되지 않거나 대장상 동 표기가 다른 오피스텔/단동)
+                # 2단계: 호수 기준 유연 매칭 (동 명칭 불일치 대응)
                 if t_ho_num:
                     for a in area_list:
                         i_ho = clean_num(a.get("hoNm", ""))
@@ -247,10 +245,9 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
                             except ValueError:
                                 pass
 
-            # 2. 전유부 기본 목록 API 조회 (getBrExposInfo) - 보완
+            # 2. 전유부 기본 목록 API 조회 (getBrExposInfo)
             expos_list = call_api_all_pages("getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji)
             if expos_list:
-                # 동 + 호 일치
                 if t_dong_num and t_ho_num:
                     for item in expos_list:
                         i_dong = clean_num(item.get("dongNm", ""))
@@ -263,7 +260,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, target_dong, target_ho):
                             except ValueError:
                                 pass
 
-                # 호수 일치
                 if t_ho_num:
                     for item in expos_list:
                         i_ho = clean_num(item.get("hoNm", ""))
@@ -285,10 +281,10 @@ def process_address(address, progress=None):
     if not address:
         return {"주소": "", "전용면적": "", "상태": "주소 없음"}
 
-    # 1. 원본 주소에서 동/호수 먼저 파싱
+    # 1. 입력 원문에서 동/호수 파싱
     target_dong, target_ho = extract_dong_ho(address)
 
-    # 2. 도로명 주소 API로 정제된 지번 정보 검색
+    # 2. 정제된 지번으로 도로명주소 API 검색
     juso, msg = search_juso(address)
     if not juso:
         return {"주소": address, "전용면적": "", "상태": msg}
@@ -316,7 +312,7 @@ def process_address(address, progress=None):
 # ============================================================
 
 st.title("🏠 건축물 전용면적 조회")
-st.write("주소를 입력하시면 동/호수 매칭을 거쳐 세대별 전용면적을 가져옵니다.")
+st.write("주소를 입력하시면 세대별 전용면적을 정확하게 가져옵니다.")
 
 addresses = []
 for i in range(10):
