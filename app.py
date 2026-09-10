@@ -27,27 +27,35 @@ DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=True)
 # 2. 파싱 유틸
 # ============================================================
 def normalize_name(s):
-    if s is None: return ""
+    if s is None:
+        return ""
     return re.sub(r"[동호제\s]", "", str(s).strip())
 
 def is_match(target, source):
     t, s = normalize_name(target), normalize_name(source)
-    if not t or not s: return False
-    if t.isdigit() and s.isdigit(): return int(t) == int(s)
+    if not t or not s:
+        return False
+    if t.isdigit() and s.isdigit():
+        return int(t) == int(s)
     return t.upper() == s.upper()
 
 def extract_dong_ho(address):
-    text = str(address).strip(); dong = ho = ""
+    text = str(address).strip()
+    dong = ho = ""
     m = re.search(r"([0-9A-Za-z]+)\s*동(?![가-힣])", text)
-    if m: dong = m.group(1)
+    if m:
+        dong = m.group(1)
     m = re.search(r"(\d+)\s*호(?![가-힣])", text)
-    if m: ho = m.group(1)
+    if m:
+        ho = m.group(1)
     if not dong and not ho:
         m = re.search(r"(\d{2,4})-(\d{3,4})\b", text)
-        if m: dong, ho = m.group(1), m.group(2)
+        if m:
+            dong, ho = m.group(1), m.group(2)
     if not ho:
         toks = text.split()
-        if toks and toks[-1].isdigit() and len(toks[-1]) >= 3: ho = toks[-1]
+        if toks and toks[-1].isdigit() and len(toks[-1]) >= 3:
+            ho = toks[-1]
     return dong, ho
 
 def extract_road_pattern(address):
@@ -62,20 +70,22 @@ def sanitize_road_address(address):
     road, num = extract_road_pattern(text)
     if road and num:
         m = re.search(re.escape(road) + r"\s*" + re.escape(num), text)
-        if m: return text[:m.end()].strip()
+        if m:
+            return text[:m.end()].strip()
     return text.strip()
 
 def validate_juso_match(user_input, juso_item):
     ur, un = extract_road_pattern(user_input)
-    if not ur or not un: return True
+    if not ur or not un:
+        return True
     ja = (juso_item.get("roadAddrPart1", "") or "") + " " + (juso_item.get("roadAddrPart2", "") or "")
     jn = ja.replace(" ", "")
     return ur.replace(" ", "") in jn and un in jn
 
 def parse_rel_jibun(rel_jibun_str):
-    """'잠원동 60-4, 60-5, 잠원동 61-2' → [(60,4),(60,5),(61,2)]"""
     results = []
-    if not rel_jibun_str: return results
+    if not rel_jibun_str:
+        return results
     for tok in re.split(r"[,，]", rel_jibun_str):
         m = re.search(r"(\d+)(?:-(\d+))?", tok.strip())
         if m:
@@ -92,40 +102,42 @@ def search_juso_single(keyword):
     try:
         res = requests.get(JUSO_API_URL, params=params, timeout=10)
         dbg["status_code"] = res.status_code
-        try: data = res.json()
+        try:
+            data = res.json()
         except ValueError:
-            dbg["raw_text"] = res.text[:500]; return [], "JSON 파싱 실패", dbg
+            dbg["raw_text"] = res.text[:500]
+            return [], "JSON 파싱 실패", dbg
         common = data.get("results", {}).get("common", {})
         if common.get("errorCode", "") not in ("", "0"):
             return [], f"오류 [{common.get('errorCode')}]", dbg
         juso_list = data.get("results", {}).get("juso", [])
         dbg["juso_count"] = len(juso_list)
-        dbg["juso_short"] = [{k: j.get(k, "") for k in
-            ("roadAddr","jibunAddr","bdNm","detBdNmList","relJibun","lnbrMnnm","lnbrSlno","buldMnnm","buldSlno")}
-            for j in juso_list]
+        dbg["juso_short"] = [
+            {k: j.get(k, "") for k in ("roadAddr", "jibunAddr", "bdNm", "detBdNmList",
+                                       "relJibun", "lnbrMnnm", "lnbrSlno", "buldMnnm", "buldSlno")}
+            for j in juso_list
+        ]
         return juso_list, "정상", dbg
     except requests.exceptions.RequestException as e:
         return [], f"요청 실패: {e}", dbg
 
 def _juso_item_to_dict(j):
     admCd = j.get("admCd", "")
-    if len(admCd) < 10: return None
-    bun = str(int(j["lnbrMnnm"])) if j.get("lnbrMnnm","").isdigit() else "0"
-    ji  = str(int(j["lnbrSlno"])) if j.get("lnbrSlno","").isdigit() else "0"
-    buld_mnnm = j.get("buldMnnm", "") or ""
-    buld_slno = j.get("buldSlno", "") or ""
-    rel_jibun = j.get("relJibun", "") or ""
+    if len(admCd) < 10:
+        return None
+    bun = str(int(j["lnbrMnnm"])) if j.get("lnbrMnnm", "").isdigit() else "0"
+    ji = str(int(j["lnbrSlno"])) if j.get("lnbrSlno", "").isdigit() else "0"
     det = (j.get("detBdNmList") or "").strip()
     return {
         "sigunguCd": admCd[:5], "bjdongCd": admCd[5:10],
         "bun": bun, "ji": ji,
-        "platGbCd": "1" if str(j.get("mtYn","0")) == "1" else "0",
+        "platGbCd": "1" if str(j.get("mtYn", "0")) == "1" else "0",
         "jibunAddr": j.get("jibunAddr", ""), "bdNm": j.get("bdNm", ""),
         "roadAddr": j.get("roadAddr", ""),
         "is_single_building": (det == ""),
-        "detBdNmList": det, "relJibun": rel_jibun,
-        "buldMnnm": buld_mnnm, "buldSlno": buld_slno,
-        # ★ Juso가 알려주는 새주소 법정동코드도 후보로 저장 ★
+        "detBdNmList": det, "relJibun": j.get("relJibun", "") or "",
+        "buldMnnm": j.get("buldMnnm", "") or "",
+        "buldSlno": j.get("buldSlno", "") or "",
         "bjdongCd_alt": j.get("naBjdongCd", "") or "",
     }
 
@@ -138,9 +150,11 @@ def search_juso(address):
     last_msg = ""
     for label, kw in candidates:
         juso_list, msg, dbg = search_juso_single(kw)
-        all_dbg[label] = dbg; last_msg = msg
+        all_dbg[label] = dbg
+        last_msg = msg
         for j in juso_list:
-            if not validate_juso_match(address, j): continue
+            if not validate_juso_match(address, j):
+                continue
             d = _juso_item_to_dict(j)
             if d:
                 d["_matched_by"] = label
@@ -162,31 +176,41 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                   "sigunguCd": sigunguCd, "bjdongCd": bjdongCd,
                   "platGbCd": platGbCd, "bun": str(bun).zfill(4), "ji": str(ji).zfill(4),
                   "numOfRows": str(ROWS_PER_PAGE), "pageNo": str(page), "_type": "json"}
-        if extra_params: params.update(extra_params)
+        if extra_params:
+            params.update(extra_params)
         try:
             raw_text = ""
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
-                    res = requests.get(url, params=params, timeout=20)
+                    res = requests.get(url, params=params, timeout=25)
                     raw_text = res.text or ""
-                    if raw_text.strip(): break
-                except requests.exceptions.RequestException: raw_text = ""
-                time.sleep(1.0 + attempt * 1.5)
+                    if raw_text.strip():
+                        break
+                except requests.exceptions.RequestException:
+                    raw_text = ""
+                if attempt < 3:
+                    time.sleep(2.0 * (attempt + 1))
+
             if not raw_text.strip():
-                error_msg = f"[{endpoint}] 빈 응답 3회"
-                debug_snippets.append({"endpoint": endpoint, "note": "empty",
-                    "params": {k: v for k, v in params.items() if k != "serviceKey"}}); break
-            try: data = res.json()
+                error_msg = f"[{endpoint}] 빈 응답 4회"
+                debug_snippets.append({"endpoint": endpoint, "note": "empty_after_4",
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"}})
+                break
+
+            try:
+                data = res.json()
             except ValueError:
                 error_msg = f"[{endpoint}] JSON 파싱 실패"
                 debug_snippets.append({"endpoint": endpoint, "status": res.status_code,
-                    "params": {k: v for k, v in params.items() if k != "serviceKey"}}); break
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"}})
+                break
 
             header = data.get("response", {}).get("header", {})
             if header.get("resultCode", "") not in ("00", "0", ""):
                 error_msg = f"[{endpoint}] API 오류 [{header.get('resultCode')}]"
                 debug_snippets.append({"endpoint": endpoint, "header": header,
-                    "params": {k: v for k, v in params.items() if k != "serviceKey"}}); break
+                    "params": {k: v for k, v in params.items() if k != "serviceKey"}})
+                break
 
             body = data.get("response", {}).get("body", {})
             items = body.get("items", {})
@@ -197,10 +221,13 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                 debug_snippets.append({"endpoint": endpoint,
                     "totalCount": body.get("totalCount", 0), "sample_short": sample,
                     "params": {k: v for k, v in params.items() if k != "serviceKey"}})
-            if not items: break
+            if not items:
+                break
             item_list = items.get("item", [])
-            if isinstance(item_list, dict): item_list = [item_list]
-            if not item_list: break
+            if isinstance(item_list, dict):
+                item_list = [item_list]
+            if not item_list:
+                break
 
             all_items.extend(item_list)
             total_count = int(body.get("totalCount", 0) or 0)
@@ -208,16 +235,21 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                 total_pages_needed = max(1, -(-total_count // ROWS_PER_PAGE))
             if match_check is not None and not collect_all:
                 for it in item_list:
-                    if match_check(it): return all_items, error_msg, debug_snippets
-            if len(all_items) >= total_count: break
-            if page >= min(total_pages_needed, MAX_PAGES): break
-            page += 1; time.sleep(0.3)
+                    if match_check(it):
+                        return all_items, error_msg, debug_snippets
+            if len(all_items) >= total_count:
+                break
+            if page >= min(total_pages_needed, MAX_PAGES):
+                break
+            page += 1
+            time.sleep(0.4)
         except requests.exceptions.RequestException as e:
-            error_msg = f"[{endpoint}] 요청 실패: {e}"; break
+            error_msg = f"[{endpoint}] 요청 실패: {e}"
+            break
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 매칭 엔진 — 다양한 bun/ji/bjdongCd 시도
+# 5. 매칭 엔진 (platGbCd 0/1/2 + 표제부 폴백)
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None):
@@ -227,48 +259,66 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     all_errors, all_debug = [], []
 
     def _is_exclusive(item):
-        return str(item.get("exposPubuseGbCd","")).strip() == "1" or \
-               ("전유" in str(item.get("exposPubuseGbCdNm","")) and "공용" not in str(item.get("exposPubuseGbCdNm","")))
+        return str(item.get("exposPubuseGbCd", "")).strip() == "1" or \
+               ("전유" in str(item.get("exposPubuseGbCdNm", "")) and
+                "공용" not in str(item.get("exposPubuseGbCdNm", "")))
 
     def _safe_area(item):
         try:
-            v = float(str(item.get("area","0")).replace(",",""))
-            if 5.0 <= v <= 500.0: return round(v, 2)
-        except (ValueError, TypeError): pass
+            v = float(str(item.get("area", "0")).replace(",", ""))
+            if 5.0 <= v <= 500.0:
+                return round(v, 2)
+        except (ValueError, TypeError):
+            pass
         return None
 
+    def _ho_num(s):
+        nums = re.findall(r"\d+", str(s or ""))
+        return nums[-1] if nums else ""
+
     def _matches(item):
-        if not _is_exclusive(item): return False
+        if not _is_exclusive(item):
+            return False
         h = (item.get("hoNm") or "").strip()
-        if not is_match(target_ho, h): return False
+        ok = is_match(target_ho, h) or (_ho_num(h) == str(target_ho).strip())
+        if not ok:
+            return False
         if target_dong:
             d = (item.get("dongNm") or "").strip()
-            if not d: return True
+            if not d:
+                return True
             return is_match(target_dong, d)
         return True
 
-    # ★ (bjdongCd, bun, ji) 조합을 여러 개 만든다 ★
+    # ---------------- 조합 생성 ----------------
     combos = []
-    def _add(bd, b, j):
-        key = (bd, str(b), str(j))
-        if key not in combos: combos.append(key)
+    def _add(pg, bd, b, j):
+        key = (str(pg), str(bd), str(b), str(j))
+        if key not in combos:
+            combos.append(key)
 
-    # 1) Juso의 지번 (bun-ji)
-    _add(bjdongCd, bun, ji)
-    if ji != "0": _add(bjdongCd, bun, "0")
-    # 2) Juso의 새주소 법정동코드 후보
-    if juso and juso.get("bjdongCd_alt"):
-        _add(juso["bjdongCd_alt"], bun, ji)
-        if ji != "0": _add(juso["bjdongCd_alt"], bun, "0")
-    # 3) 도로명 번호(buldMnnm/buldSlno)를 지번처럼 시도
-    if juso and juso.get("buldMnnm","").isdigit():
-        bs = juso.get("buldSlno","") if juso.get("buldSlno","").isdigit() else "0"
-        _add(bjdongCd, juso["buldMnnm"], bs)
-        _add(bjdongCd, juso["buldMnnm"], "0")
-    # 4) relJibun에 있는 관련 지번들
+    plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
+
+    bun_ji_candidates = [(bun, ji)]
+    if ji != "0":
+        bun_ji_candidates.append((bun, "0"))
+    if juso and juso.get("buldMnnm", "").isdigit():
+        bs = juso.get("buldSlno", "") if juso.get("buldSlno", "").isdigit() else "0"
+        bun_ji_candidates.append((juso["buldMnnm"], bs))
+        if bs != "0":
+            bun_ji_candidates.append((juso["buldMnnm"], "0"))
     if juso and juso.get("relJibun"):
         for rb, rj in parse_rel_jibun(juso["relJibun"]):
-            _add(bjdongCd, rb, rj)
+            bun_ji_candidates.append((rb, rj))
+
+    bjdong_candidates = [bjdongCd]
+    if juso and juso.get("bjdongCd_alt"):
+        bjdong_candidates.append(juso["bjdongCd_alt"])
+
+    for pg in plat_candidates:
+        for bd in bjdong_candidates:
+            for b, j in bun_ji_candidates:
+                _add(pg, bd, b, j)
 
     # 필터 variants
     filter_attempts = []
@@ -282,13 +332,14 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     filter_attempts.append({"hoNm": str(target_ho)})
     filter_attempts.append({"hoNm": f"{target_ho}호"})
 
-    # ---------- 1단계: 필터 시도 ----------
-    for bd, b, j in combos:
+    # ---------- 1단계: 필터 (앞 5개 combo) ----------
+    for pg, bd, b, j in combos[:5]:
         for extra in filter_attempts:
             area_list, err1, dbg1 = call_api_all_pages(
-                "getBrExposPubuseAreaInfo", sigunguCd, bd, platGbCd, b, j,
+                "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
                 match_check=_matches, extra_params=extra)
-            if err1: all_errors.append(err1)
+            if err1:
+                all_errors.append(err1)
             all_debug.extend(dbg1)
             for a in area_list:
                 if _matches(a):
@@ -296,14 +347,15 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                     if val is not None:
                         return val, "조회 성공 (필터)", all_errors, all_debug
 
-    # ---------- 2단계: 전체조회 survey ----------
+    # ---------- 2단계: 전체조회 ----------
     survey_items = []
     any_data_found = False
-    for bd, b, j in combos:
+    for pg, bd, b, j in combos:
         area_list, err1, dbg1 = call_api_all_pages(
-            "getBrExposPubuseAreaInfo", sigunguCd, bd, platGbCd, b, j,
+            "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
             match_check=None, extra_params=None, collect_all=True)
-        if err1: all_errors.append(err1)
+        if err1:
+            all_errors.append(err1)
         all_debug.extend(dbg1)
         if area_list:
             any_data_found = True
@@ -313,30 +365,73 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 val = _safe_area(matched[0])
                 if val is not None:
                     return val, "조회 성공 (전체조회)", all_errors, all_debug
-            break  # 데이터가 나온 combo에서만 매칭
+            break
 
-    # ---------- 3단계: 실패 리포트 ----------
+    # ---------- 3단계: 표제부 폴백 ----------
     if not any_data_found:
-        tried = ", ".join([f"{bd}/{b}-{j}" for bd, b, j in combos])
-        status = f"모든 지번 조합에서 데이터 0건. 시도한 (bjdongCd/bun-ji): [{tried}]"
-        if juso and juso.get("relJibun"):
-            status += f" | Juso 관련지번: {juso['relJibun']}"
-        return None, status, all_errors, all_debug
+        title = None
+        title_dbg = []
+        for pg in plat_candidates:
+            items, terr, tdbg = call_api_all_pages(
+                "getBrTitleInfo", sigunguCd, bjdongCd, pg, bun, ji,
+                match_check=None, extra_params=None, collect_all=True)
+            title_dbg.extend(tdbg)
+            if items:
+                items_sorted = sorted(items, key=lambda x: str(x.get("useAprDay", "")), reverse=True)
+                title = items_sorted[0]
+                break
+        all_debug.extend(title_dbg)
 
-    # 존재하는 호수 목록
-    hos = sorted({i.get("hoNm","") for i in survey_items if i.get("hoNm") and
-                  (not target_dong or is_match(target_dong, i.get("dongNm","")))},
-                 key=lambda x: (len(x), x))
-    dongs = sorted({(i.get("dongNm") or "").strip() for i in survey_items if (i.get("dongNm") or "").strip()})
+        if title:
+            tot = title.get("totArea", "")
+            hhld = title.get("hhldCnt", "")
+            ho_cnt = title.get("hoCnt", "")
+            purps = title.get("mainPurpsCdNm", "")
+            bld_nm = title.get("bldNm", "")
+            use_day = title.get("useAprDay", "")
 
-    hint = ""
-    if hos:
-        hint = f" | 존재하는 호수: [{', '.join(hos[:20])}{'...' if len(hos)>20 else ''}]"
-    elif target_dong and dongs:
-        hint = f" | '{target_dong}동' 없음. 있는 동: {', '.join(dongs[:15])}"
+            msg = (
+                f"이 건물은 '{purps}'으로 호별 전유면적이 대장에 없습니다. "
+                f"(건물명: {bld_nm or '-'}, 사용승인일: {use_day or '-'}) "
+                f"연면적 {tot}㎡, 세대수 {hhld}, 호수 {ho_cnt}"
+            )
+            try:
+                cnt = int(hhld or ho_cnt or 1)
+                if cnt > 0:
+                    est = float(str(tot).replace(",", "")) / cnt
+                    msg += f" → 세대당 추정 약 {est:.1f}㎡"
+            except (ValueError, ZeroDivisionError):
+                pass
+            return None, msg, all_errors, all_debug
 
-    status = f"동/호 매칭 실패 (입력: {target_dong or '?'}동 {target_ho}호){hint}"
-    if all_errors: status += f" | API 오류: {all_errors[0]}"
+        tried = [f"{pg}/{bd}/{b}-{j}" for pg, bd, b, j in combos]
+        return None, (f"전유부·표제부 모두 데이터 없음. "
+                      f"입력 지번: {bun}-{ji}, bjdongCd: {bjdongCd}. "
+                      f"시도한 조합({len(tried)}개): {tried}"), all_errors, all_debug
+
+    # ---------- 4단계: 매칭 실패 리포트 ----------
+    all_dongs = sorted({(i.get("dongNm") or "").strip() for i in survey_items
+                        if (i.get("dongNm") or "").strip()})
+    all_hos = sorted({(i.get("hoNm") or "").strip() for i in survey_items
+                      if (i.get("hoNm") or "").strip()})
+    similar_hos = [h for h in all_hos if _ho_num(h) == str(target_ho).strip()]
+
+    hint_parts = []
+    if all_dongs:
+        hint_parts.append(f"dongNm({len(all_dongs)}): {', '.join(all_dongs[:15])}")
+    if all_hos:
+        preview = ", ".join(all_hos[:30])
+        more = f"... (총 {len(all_hos)}개)" if len(all_hos) > 30 else ""
+        hint_parts.append(f"hoNm: [{preview}]{more}")
+    if similar_hos:
+        hint_parts.append(f"★ '{target_ho}'와 숫자 같은 hoNm: {similar_hos}")
+
+    hint = " | ".join(hint_parts) if hint_parts else ""
+    status = f"동/호 매칭 실패 (입력: {target_dong or '?'}동 {target_ho}호)"
+    if hint:
+        status += f" | {hint}"
+    if all_errors:
+        status += f" | API 오류: {all_errors[0]}"
     return None, status, all_errors, all_debug
 
 # ============================================================
@@ -353,7 +448,7 @@ def process_address(address, progress=None):
 
     if progress:
         progress.write(
-            f"① 매칭({juso.get('_matched_by','-')}): {juso['jibunAddr']} "
+            f"① 매칭({juso.get('_matched_by', '-')}): {juso['jibunAddr']} "
             f"| 법정동: {juso['sigunguCd']}{juso['bjdongCd']} (alt:{juso.get('bjdongCd_alt') or '-'}) "
             f"| 지번: {juso['bun']}-{juso['ji']} "
             f"| 도로번호: {juso.get('buldMnnm')}-{juso.get('buldSlno')} "
@@ -376,18 +471,22 @@ def process_address(address, progress=None):
 # 7. UI
 # ============================================================
 st.title("🏠 건축물 전용면적 조회")
-st.caption("💡 **'OO동 OOOO호'** 형식 권장.")
+st.caption("💡 **'OO동 OOOO호'** 형식 권장. (예: 서울시 서초구 신반포로33길 15 동아아파트 103동 701호)")
 
 addresses = []
 for i in range(10):
-    address = st.text_input(f"주소 {i+1}", key=f"address_{i}",
-        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 OOO동 OOOO호")
+    address = st.text_input(
+        f"주소 {i + 1}",
+        key=f"address_{i}",
+        placeholder="예: 서울시 서초구 신반포로33길 15 동아아파트 103동 701호"
+    )
     addresses.append(address.strip())
 
 if st.button("🔎 전용면적 조회", type="primary", use_container_width=True):
     targets = [x for x in addresses if x]
     if not targets:
-        st.warning("주소를 하나 이상 입력해주세요."); st.stop()
+        st.warning("주소를 하나 이상 입력해주세요.")
+        st.stop()
 
     st.markdown("---")
     results = []
@@ -398,9 +497,14 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
         results.append(result)
         if result["전용면적"]:
             (st.success if "[확정]" in result["상태"] else st.warning)(
-                f"전용면적{'' if '[확정]' in result['상태'] else '(추정)'}: {result['전용면적']} ({result['상태']})")
+                f"전용면적{'' if '[확정]' in result['상태'] else '(추정)'}: "
+                f"{result['전용면적']} ({result['상태']})")
         else:
-            st.error(f"조회 실패: {result['상태']}")
+            if "호별 전유면적이" in result["상태"]:
+                st.info(f"ℹ️ {result['상태']}")
+            else:
+                st.error(f"조회 실패: {result['상태']}")
+
         if DEBUG and dbg_bundle:
             with st.expander("🔧 디버그 정보"):
                 st.json(dbg_bundle)
@@ -410,5 +514,10 @@ if st.button("🔎 전용면적 조회", type="primary", use_container_width=Tru
     st.subheader("📋 조회 결과")
     st.dataframe(results, use_container_width=True, hide_index=True)
     csv = pd.DataFrame(results).to_csv(index=False, encoding="utf-8-sig")
-    st.download_button("📥 CSV 다운로드", data=csv,
-        file_name="전용면적_조회결과.csv", mime="text/csv", use_container_width=True)
+    st.download_button(
+        "📥 CSV 다운로드",
+        data=csv,
+        file_name="전용면적_조회결과.csv",
+        mime="text/csv",
+        use_container_width=True
+        )
