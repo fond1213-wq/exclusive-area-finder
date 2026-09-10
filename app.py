@@ -175,7 +175,12 @@ def search_juso(address):
 # 4. 국토부 건축물대장 API 호출 (에러를 절대 숨기지 않음)
 # ============================================================
 
-def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
+def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji, match_check=None):
+    """
+    match_check: 선택적으로 (item) -> bool 형태의 콜백을 넘기면,
+    페이지를 받아올 때마다 즉시 검사해서 매칭되는 순간 조기 종료한다.
+    대형 복합단지(수만 건)라도 매 페이지 검사를 통해 불필요한 전체 수집을 피한다.
+    """
     url = f"{BUILDING_API_BASE}/{endpoint}"
     bun_str = str(bun).zfill(4)
     ji_str = str(ji).zfill(4)
@@ -184,8 +189,11 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
     page = 1
     error_msg = None
     debug_snippets = []
+    ROWS_PER_PAGE = 1000
+    MAX_PAGES = 40  # 안전 상한: 40 * 1000 = 최대 40,000건까지 탐색 (초대형 복합단지 대비)
+    total_pages_needed = None
 
-    while page <= 5:
+    while True:
         params = {
             "serviceKey": BUILDING_API_KEY_DECODED,
             "sigunguCd": sigunguCd,
@@ -193,7 +201,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
             "platGbCd": platGbCd,
             "bun": bun_str,
             "ji": ji_str,
-            "numOfRows": "100",
+            "numOfRows": str(ROWS_PER_PAGE),
             "pageNo": str(page),
             "_type": "json",
         }
@@ -237,7 +245,23 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji):
             all_items.extend(item_list)
 
             total_count = int(body.get("totalCount", 0) or 0)
+            if total_pages_needed is None:
+                total_pages_needed = max(1, -(-total_count // ROWS_PER_PAGE))  # 올림 나눗셈
+
+            # 페이지를 받을 때마다 바로 매칭을 시도해서, 찾으면 나머지 페이지는 가져오지 않는다.
+            if match_check is not None:
+                for it in item_list:
+                    if match_check(it):
+                        return all_items, error_msg, debug_snippets
+
             if len(all_items) >= total_count:
+                break
+            if page >= min(total_pages_needed, MAX_PAGES):
+                if page >= MAX_PAGES and len(all_items) < total_count:
+                    error_msg = (
+                        f"[{endpoint}] 안전 상한({MAX_PAGES * ROWS_PER_PAGE}건)까지 조회했으나 "
+                        f"전체 {total_count}건 중 일부만 확인했습니다. (초대형 단지)"
+                    )
                 break
             page += 1
 
@@ -262,10 +286,20 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
     all_errors = []
     all_debug = []
 
+    def _match_check(item):
+        # 대형 단지 페이지네이션 조기 종료용: 호수가 일치하면 바로 멈춘다
+        # (동까지 있으면 동도 함께 확인해 더 정확하게 조기 종료)
+        if target_dong and target_ho:
+            return is_match(target_dong, item.get("dongNm", "")) and is_match(target_ho, item.get("hoNm", ""))
+        if target_ho:
+            return is_match(target_ho, item.get("hoNm", ""))
+        return False
+
     for current_ji in ji_variants:
         for platGbCd in plat_gb_candidates:
             area_list, err1, dbg1 = call_api_all_pages(
-                "getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji
+                "getBrExposPubuseAreaInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
+                match_check=_match_check,
             )
             if err1:
                 all_errors.append(err1)
@@ -299,7 +333,8 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, plat_gb_cd_hint, target_do
                                     pass
 
             expos_list, err2, dbg2 = call_api_all_pages(
-                "getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji
+                "getBrExposInfo", sigunguCd, bjdongCd, platGbCd, bun, current_ji,
+                match_check=_match_check,
             )
             if err2:
                 all_errors.append(err2)
