@@ -620,7 +620,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 조회")
 
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
-    st.caption("건물명(예: 청담르엘) 또는 주소 일부(예: 학동로 607)를 입력하세요.")
+    st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
 
     if "search_candidates" not in st.session_state:
         st.session_state.search_candidates = []
@@ -706,14 +706,14 @@ if _flash:
 
 st.subheader("📋 전용면적 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
-           "괄호 안 추가정보(예: (청담동, 청담르엘))는 자동으로 무시됩니다.")
+           "괄호 안 추가정보(예: (중앙동, 과천 푸르지오 써밋)는 자동으로 무시됩니다.")
 
 addresses = []
 for i in range(10):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울특별시 강남구 학동로 607 청담르엘 101동 1401호"
+        placeholder="예: 경기도 과천시 관문로 106 과천푸르지오써밋 OOO동 OOO호"
     )
     addresses.append(address.strip())
 
