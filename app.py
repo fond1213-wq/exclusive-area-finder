@@ -633,7 +633,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
     with col1:
         search_kw = st.text_input(
             "검색어", key="juso_search_kw",
-            placeholder="예: 청담르엘 / 학동로 607 / 신반포로33길",
+            placeholder="예: 반포자이/ 관문로 106 / 신반포로33길",
             label_visibility="collapsed"
         )
     with col2:
