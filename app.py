@@ -1184,13 +1184,24 @@ st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "단독주택은 표제부 **연면적과 대지면적**을 함께 반환합니다.")
 
 # ============================================================
-# ★ 주소 입력 개수 관리 (동적 1 ~ 10개)
+# ★ 주소 입력칸 (동적 1 ~ 10개) — 입력칸 먼저, 버튼은 마지막 입력칸 아래
 # ============================================================
 if "address_count" not in st.session_state:
     st.session_state.address_count = 1
 
 MAX_ADDRESS = 10
 
+# 주소 1 ~ N 입력칸을 먼저 렌더링 (주소1이 맨 위, 추가될수록 아래로 붙음)
+addresses = []
+for i in range(st.session_state.address_count):
+    address = st.text_input(
+        f"주소 {i + 1}",
+        key=f"address_{i}",
+        placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호",
+    )
+    addresses.append(address.strip())
+
+# 입력칸 아래에 버튼들 배치
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
 
 with ctrl_col1:
@@ -1227,15 +1238,6 @@ st.caption(
     f"현재 입력칸: **{st.session_state.address_count} / {MAX_ADDRESS}** 개  "
     f"({'최대치 도달' if st.session_state.address_count >= MAX_ADDRESS else '➕ 버튼으로 추가 가능'})"
 )
-
-addresses = []
-for i in range(st.session_state.address_count):
-    address = st.text_input(
-        f"주소 {i + 1}",
-        key=f"address_{i}",
-        placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호",
-    )
-    addresses.append(address.strip())
 
 st.markdown("---")
 
@@ -1302,4 +1304,4 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                       )
+            )
