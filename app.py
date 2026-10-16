@@ -27,7 +27,13 @@ PERMIT_API_KEY_DECODED = urllib.parse.unquote(PERMIT_API_KEY_RAW)
 
 JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
-DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=True)
+# ★ 디버그 모드 기본값 False (앱 시작 시 접힘)
+DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=False)
+
+# ★ 세션 상태 초기화 (주소 입력칸 개수)
+if "address_count" not in st.session_state:
+    st.session_state.address_count = 1
+MAX_ADDRESS = 10
 
 APARTMENT_BRAND_KEYWORDS = (
     "자이", "푸르지오", "래미안", "힐스테이트", "아이파크", "e편한세상", "편한세상",
@@ -245,7 +251,7 @@ def search_address_candidates(keyword, count=20):
     return results, None
 
 # ============================================================
-# 4. 국토부 API 호출 (전유부·표제부용 — BUILDING_API_KEY)
+# 4. 국토부 API 호출
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
@@ -537,7 +543,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# ★ 5-1. 총괄표제부 조회 (대지면적·층수·세대수 보완용)
+# ★ 5-1. 총괄표제부 조회
 # ============================================================
 def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
@@ -568,7 +574,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
 
 
 # ============================================================
-# ★ 5-2. 건축인허가정보 API: 주택유형 조회 (PERMIT_API_KEY)
+# ★ 5-2. 건축인허가정보 API: 주택유형 조회
 # ============================================================
 def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
@@ -1093,6 +1099,9 @@ def process_address(address, progress=None):
 # ============================================================
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
+# ============================================================
+# ★ 도로명주소 검색 (검색 결과 접기/펼치기 지원)
+# ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
 
@@ -1107,7 +1116,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
     with col1:
         search_kw = st.text_input(
             "검색어", key="juso_search_kw",
-            placeholder="예: 반포자이/ 관문로 106 / 신반포로33길",
+            placeholder="예: 반포자이 / 관문로 106 / 신반포로33길",
             label_visibility="collapsed"
         )
     with col2:
@@ -1132,45 +1141,58 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         elif not candidates:
             st.info("검색 결과가 없습니다.")
         else:
-            st.success(f"총 {len(candidates)}건 검색됨")
+            # ★ 검색 결과를 접을 수 있는 expander로 감쌈
+            with st.expander(
+                f"🔍 총 {len(candidates)}건 검색됨  (클릭하여 접기/펼치기)",
+                expanded=True
+            ):
+                slot_count = st.session_state.address_count
+                st.caption(f"💡 각 결과 하단의 버튼으로 **현재 열려있는 주소 입력칸(1~{slot_count})** 중 원하는 위치에 넣을 수 있습니다.")
 
-            target_slot = st.selectbox(
-                "⬆️ 이 주소를 넣을 위치",
-                options=list(range(1, 11)),
-                format_func=lambda x: f"주소 {x}",
-                key="target_slot"
-            )
+                for i, c in enumerate(candidates, start=1):
+                    with st.container(border=True):
+                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                        if c["건물명"]:
+                            st.caption(f"🏢 건물명: {c['건물명']}")
+                        if c["지번주소"]:
+                            st.caption(f"📍 지번: {c['지번주소']}")
+                        if c["동목록"]:
+                            dong_preview = c["동목록"]
+                            if len(dong_preview) > 200:
+                                dong_preview = dong_preview[:200] + "..."
+                            st.caption(f"🏠 동목록: {dong_preview}")
 
-            for i, c in enumerate(candidates, start=1):
-                with st.container(border=True):
-                    st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
-                    if c["건물명"]:
-                        st.caption(f"🏢 건물명: {c['건물명']}")
-                    if c["지번주소"]:
-                        st.caption(f"📍 지번: {c['지번주소']}")
-                    if c["동목록"]:
-                        dong_preview = c["동목록"]
-                        if len(dong_preview) > 200:
-                            dong_preview = dong_preview[:200] + "..."
-                        st.caption(f"🏠 동목록: {dong_preview}")
+                        # ★ 원본 주소 → 각 입력칸에 넣기 버튼
+                        st.caption("📥 **원본 주소** 넣을 위치:")
+                        cols_orig = st.columns(min(slot_count, 5))
+                        for slot_idx in range(slot_count):
+                            with cols_orig[slot_idx % 5]:
+                                if st.button(
+                                    f"주소 {slot_idx + 1}",
+                                    key=f"orig_{i}_{slot_idx}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state[f"address_{slot_idx}"] = c["도로명주소"]
+                                    st.session_state["_flash_msg"] = (
+                                        f"✅ 주소 {slot_idx + 1}에 입력 완료: {c['도로명주소']}"
+                                    )
+                                    st.rerun()
 
-                    bcol1, bcol2 = st.columns(2)
-                    with bcol1:
-                        if st.button(f"⬆️ 주소 {target_slot}에 넣기 (원본)",
-                                     key=f"use_full_{i}", use_container_width=True):
-                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소"]
-                            st.session_state["_flash_msg"] = (
-                                f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소']}"
-                            )
-                            st.rerun()
-                    with bcol2:
-                        if st.button(f"⬆️ 주소 {target_slot}에 넣기 (괄호 제거)",
-                                     key=f"use_clean_{i}", use_container_width=True):
-                            st.session_state[f"address_{target_slot - 1}"] = c["도로명주소_깔끔"]
-                            st.session_state["_flash_msg"] = (
-                                f"✅ 주소 {target_slot}에 입력 완료: {c['도로명주소_깔끔']}"
-                            )
-                            st.rerun()
+                        # ★ 괄호 제거 주소 → 각 입력칸에 넣기 버튼
+                        st.caption("📥 **괄호 제거 주소** 넣을 위치:")
+                        cols_clean = st.columns(min(slot_count, 5))
+                        for slot_idx in range(slot_count):
+                            with cols_clean[slot_idx % 5]:
+                                if st.button(
+                                    f"주소 {slot_idx + 1}",
+                                    key=f"clean_{i}_{slot_idx}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state[f"address_{slot_idx}"] = c["도로명주소_깔끔"]
+                                    st.session_state["_flash_msg"] = (
+                                        f"✅ 주소 {slot_idx + 1}에 입력 완료: {c['도로명주소_깔끔']}"
+                                    )
+                                    st.rerun()
 
 st.markdown("---")
 
@@ -1184,14 +1206,8 @@ st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "단독주택은 표제부 **연면적과 대지면적**을 함께 반환합니다.")
 
 # ============================================================
-# ★ 주소 입력칸 (동적 1 ~ 10개) — 입력칸 먼저, 버튼은 마지막 입력칸 아래
+# ★ 주소 입력칸 (동적 1 ~ 10개)
 # ============================================================
-if "address_count" not in st.session_state:
-    st.session_state.address_count = 1
-
-MAX_ADDRESS = 10
-
-# 주소 1 ~ N 입력칸을 먼저 렌더링 (주소1이 맨 위, 추가될수록 아래로 붙음)
 addresses = []
 for i in range(st.session_state.address_count):
     address = st.text_input(
@@ -1201,7 +1217,6 @@ for i in range(st.session_state.address_count):
     )
     addresses.append(address.strip())
 
-# 입력칸 아래에 버튼들 배치
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
 
 with ctrl_col1:
@@ -1304,4 +1319,4 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-            )
+                               )
