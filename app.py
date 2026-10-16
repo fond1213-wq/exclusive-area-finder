@@ -521,10 +521,10 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# ★ 5-1. 표제부 조회 (주택유형 판별용)
+# ★ 5-1. 표제부 조회 (주택유형 판별 + 단독주택 면적용)
 # ============================================================
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
-    """표제부(getBrTitleInfo)에서 주용도/기타용도/세대수 등 조회"""
+    """표제부(getBrTitleInfo)에서 주용도/기타용도/세대수/면적 등 조회"""
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
 
@@ -551,14 +551,16 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                     "건축면적": item.get("archArea", "") or "",
                     "지상층수": item.get("grndFlrCnt", "") or "",
                     "지하층수": item.get("ugrFlrCnt", "") or "",
+                    "가구수": item.get("fmlyCnt", "") or "",  # 단독/다가구용
                 }
                 return info, None, all_debug
     return None, "표제부 정보 없음", all_debug
 
 
 def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", hhld="",
-                           grnd_flr="", plat_area="", arch_area="", ho_cnt=""):
-    """주용도코드 + 주용도명 + 층수 + 대지/건축면적 + 세대수 조합으로 주택유형 판별"""
+                           grnd_flr="", plat_area="", arch_area="", ho_cnt="",
+                           tot_area=""):
+    """주용도코드 + 주용도명 + 층수 + 면적 + 세대수 조합으로 주택유형 정밀 판별"""
 
     def _to_int(v):
         try:
@@ -582,8 +584,9 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", hhld="",
     flr_n = _to_int(grnd_flr)
     plat_n = _to_float(plat_area)
     arch_n = _to_float(arch_area)
+    tot_n = _to_float(tot_area)
 
-    # ---------- 1) 주용도명에 명확한 키워드 우선 ----------
+    # ---------- 1) 주용도명에 명확한 키워드가 있으면 우선 ----------
     if "아파트" in nm:
         return "아파트"
     if "다세대" in nm:
@@ -597,18 +600,21 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", hhld="",
 
     # ---------- 2) 주용도코드 기반 정밀 분류 ----------
     # 코드 02000 = 공동주택 (아파트/연립/다세대 통합)
-    if cd.startswith("02000") or cd == "02000":
-        # 층수로 1차 구분
+    if cd.startswith("02000") or cd == "02000" or "공동주택" in nm:
+        # ★ 층수 + 바닥면적 합계로 정밀 구분
+        # 법적 기준(주택법 시행령 제10조):
+        #   아파트: 5층 이상
+        #   연립주택: 4층 이하 + 1개동 바닥면적 합계 660㎡ 초과
+        #   다세대주택: 4층 이하 + 1개동 바닥면적 합계 660㎡ 이하
         if flr_n is not None:
             if flr_n >= 5:
                 return "아파트"
-            # 4층 이하 → 연립 vs 다세대
-            # 법적 기준: 연립=바닥면적 600㎡ 초과, 다세대=600㎡ 이하
-            # 대지면적 또는 건축면적 600㎡ 기준
-            area_ref = plat_n if plat_n is not None else arch_n
+            # 4층 이하 → 연립 vs 다세대 (660㎡ 기준)
+            # 바닥면적 합계를 알 수 없으면 건축면적(archArea)을 대용
+            area_ref = arch_n if arch_n is not None else (plat_n if plat_n is not None else tot_n)
             if area_ref is not None:
-                return "연립주택" if area_ref > 600 else "다세대주택"
-            # 면적 정보 없으면 세대수로 추정
+                return "연립주택" if area_ref > 660 else "다세대주택"
+            # 면적 정보 없으면 세대수로 보조 판단
             if hhld_n is not None:
                 return "다세대주택" if hhld_n <= 4 else "연립주택"
             return "공동주택(층수·면적 정보 없음)"
@@ -690,7 +696,7 @@ def process_address(address, progress=None):
         if juso.get("relJibun"):
             progress.caption(f"관련지번: {juso['relJibun']}")
 
-    # ★ (1) 주택유형 먼저 조회
+    # ★ (1) 표제부 조회 → 주택유형 + 단독주택 연면적
     type_info, type_err, type_dbg = fetch_building_type(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"], juso=juso)
@@ -705,11 +711,33 @@ def process_address(address, progress=None):
             plat_area=type_info.get("대지면적", ""),
             arch_area=type_info.get("건축면적", ""),
             ho_cnt=type_info.get("호수", ""),
+            tot_area=type_info.get("연면적", ""),
         )
     else:
         housing_type = ""
 
-    # ★ (2) 전용면적 조회
+    # ★ (2) 단독주택이면 표제부 연면적을 바로 전용면적으로 반환
+    is_single_house = housing_type in ("단독주택", "단독(다가구)주택")
+    if is_single_house and type_info:
+        tot = type_info.get("연면적", "")
+        if tot:
+            try:
+                tot_val = float(str(tot).replace(",", ""))
+                debug_bundle = {
+                    "juso_debug": juso_debug,
+                    "type_debug": type_dbg,
+                    "type_info": type_info,
+                }
+                return {
+                    "주소": address,
+                    "전용면적": f"{tot_val:.2f}㎡ (연면적)",
+                    "주택유형": housing_type,
+                    "상태": f"단독주택 연면적 반환 (사용승인일: {type_info.get('사용승인일', '-')})",
+                }, debug_bundle
+            except (ValueError, TypeError):
+                pass
+
+    # ★ (3) 공동주택이면 전유부에서 호별 전용면적 조회
     area, status, errors, api_debug = find_dedicated_area(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"], target_dong, target_ho, juso=juso,
@@ -732,6 +760,19 @@ def process_address(address, progress=None):
             "주택유형": housing_type or "-",
             "상태": f"{status} [{conf}]",
         }, debug_bundle
+
+    # 공동주택인데 전유부 조회 실패 시 표제부 연면적으로 폴백
+    if type_info and type_info.get("연면적"):
+        try:
+            tot_val = float(str(type_info["연면적"]).replace(",", ""))
+            return {
+                "주소": address,
+                "전용면적": f"{tot_val:.2f}㎡ (연면적 폴백)",
+                "주택유형": housing_type or "-",
+                "상태": f"전유부 조회 실패, 표제부 연면적으로 대체 (건물명: {type_info.get('건물명', '-')})",
+            }, debug_bundle
+        except (ValueError, TypeError):
+            pass
 
     return {
         "주소": address,
@@ -834,7 +875,8 @@ if _flash:
 st.subheader("📋 전용면적 · 주택유형 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "괄호 안 추가정보(예: (중앙동, 과천 푸르지오 써밋)는 자동으로 무시됩니다. "
-           "주택유형은 건축물대장 표제부의 **주용도코드/주용도/층수/대지면적/세대수**를 조합해 판별합니다.")
+           "주택유형은 건축물대장 표제부의 **주용도코드/주용도/층수/건축면적/세대수**를 조합해 판별합니다. "
+           "단독주택은 표제부 **연면적**을 전용면적으로 반환합니다.")
 
 addresses = []
 for i in range(10):
@@ -866,7 +908,7 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
         if result["전용면적"]:
             (st.success if "[확정]" in status_txt else st.warning)(
                 f"🏢 주택유형: **{type_txt}**  |  "
-                f"📐 전용면적{'' if '[확정]' in status_txt else '(추정)'}: {area_txt} "
+                f"📐 면적: {area_txt} "
                 f"({status_txt})")
         else:
             if type_txt and type_txt != "-":
@@ -899,4 +941,4 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                                  )
+        )
