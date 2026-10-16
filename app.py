@@ -47,7 +47,6 @@ VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
 # ★ 슬롯 유틸
 # ============================================================
 def get_next_empty_slot():
-    """1-based 다음 빈 슬롯 번호 (1~10). 모두 채워져 있으면 10 반환."""
     for i in range(MAX_ADDRESS):
         val = str(st.session_state.get(f"address_{i}", "") or "").strip()
         if not val:
@@ -55,14 +54,12 @@ def get_next_empty_slot():
     return MAX_ADDRESS
 
 def fill_slot(slot_idx_0based, value):
-    """0-based 슬롯 인덱스에 값 채우기. 필요 시 address_count 확장."""
     st.session_state[f"address_{slot_idx_0based}"] = value
     needed = slot_idx_0based + 1
     if needed > st.session_state.address_count:
         st.session_state.address_count = needed
 
 def slot_label(slot_1based, next_slot_1based):
-    """슬롯 라벨: ⭐ 다음 빈슬롯, ✏️ 덮어쓰기"""
     is_next = (slot_1based == next_slot_1based)
     has_val = bool(
         str(st.session_state.get(f"address_{slot_1based - 1}", "") or "").strip()
@@ -76,12 +73,40 @@ def slot_label(slot_1based, next_slot_1based):
     return f"주소 {slot_1based}", False
 
 def combine_address(base, detail):
-    """기본주소 + 상세주소 결합"""
     b = str(base or "").strip()
     d = str(detail or "").strip()
     if not d:
         return b
     return f"{b} {d}"
+
+# ============================================================
+# ★ 슬롯 선택 모달 다이얼로그 (선택 시 자동 닫힘)
+# ============================================================
+@st.dialog("📥 주소 넣을 위치 선택")
+def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
+    st.caption("넣을 위치를 선택하세요. **선택 즉시 반영되고 창이 자동으로 닫힙니다.**")
+    base_val = candidate.get(base_key, "")
+    detail_val = st.session_state.get(detail_key, "")
+    final_val = combine_address(base_val, detail_val)
+    st.caption(f"📝 입력될 주소: `{final_val}`")
+
+    for slot_1b in range(1, MAX_ADDRESS + 1):
+        label, is_next = slot_label(slot_1b, next_slot_1based)
+        if st.button(
+            label,
+            key=f"dlg_{base_key}_{slot_1b}",
+            use_container_width=True,
+            type="primary" if is_next else "secondary",
+        ):
+            final_value = combine_address(
+                candidate.get(base_key, ""),
+                st.session_state.get(detail_key, ""),
+            )
+            fill_slot(slot_1b - 1, final_value)
+            st.session_state["_flash_msg"] = (
+                f"✅ 주소 {slot_1b}에 입력 완료: {final_value}"
+            )
+            st.rerun()
 
 # ============================================================
 # 2. 파싱 유틸
@@ -1138,7 +1163,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색 (popover + 상세주소 입력)
+# ★ 도로명주소 검색 (모달 방식 + 상세주소 입력 박스)
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1186,86 +1211,77 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                 next_slot_1based = get_next_empty_slot()
                 st.info(
                     f"**⭐ 주소 {next_slot_1based} (다음 빈슬롯)** 이 기본 선택됩니다. "
-                    f"각 결과에서 **📝 상세주소(동/호)** 를 입력한 뒤 "
+                    f"각 결과의 **📝 상세주소(동/호)** 를 입력한 뒤 "
                     f"**📥 원본 주소 넣기** 또는 **📥 괄호 제거 주소 넣기** 버튼을 눌러주세요. "
-                    f"(이미 값이 있는 슬롯은 ✏️ 덮어쓰기)"
+                    f"슬롯을 선택하면 팝업이 자동으로 닫힙니다."
                 )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
-                        # ── 상단: 주소 정보 (좌) / 버튼 2개 (우) ──
-                        info_col, btn_col1, btn_col2 = st.columns([5, 1.3, 1.4])
+                        # ── 1. 주소 정보 (최상단) ──
+                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                        if c["건물명"]:
+                            st.caption(f"🏢 건물명: {c['건물명']}")
+                        if c["지번주소"]:
+                            st.caption(f"📍 지번: {c['지번주소']}")
+                        if c["동목록"]:
+                            dong_preview = c["동목록"]
+                            if len(dong_preview) > 200:
+                                dong_preview = dong_preview[:200] + "..."
+                            st.caption(f"🏠 동목록: {dong_preview}")
 
-                        with info_col:
-                            st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
-                            if c["건물명"]:
-                                st.caption(f"🏢 건물명: {c['건물명']}")
-                            if c["지번주소"]:
-                                st.caption(f"📍 지번: {c['지번주소']}")
-                            if c["동목록"]:
-                                dong_preview = c["동목록"]
-                                if len(dong_preview) > 200:
-                                    dong_preview = dong_preview[:200] + "..."
-                                st.caption(f"🏠 동목록: {dong_preview}")
-
-                        # ── 상세주소 입력칸 (하단 전폭) ──
+                        # ── 2. 상세주소 입력 박스 (주소 바로 아래, 눈에 띄게) ──
                         detail_key = f"detail_{i}"
-                        detail_val = st.text_input(
-                            "📝 상세주소 (동/호수) — 아래 넣기 버튼 클릭 시 함께 입력됩니다",
-                            key=detail_key,
-                            placeholder="예: 113동 401호  (비워두면 기본주소만 입력)",
-                        )
+                        with st.container(border=True):
+                            st.markdown("##### 📝 상세주소 (동/호수) 입력")
+                            st.caption(
+                                "동/호수를 입력하면 아래 **📥 넣기** 버튼 클릭 시 "
+                                "**기본주소 뒤에 자동으로 붙어서** 입력됩니다. "
+                                "(비워두면 기본주소만 입력)"
+                            )
+                            detail_val = st.text_input(
+                                "상세주소",
+                                key=detail_key,
+                                placeholder="예: 113동 401호",
+                                label_visibility="collapsed",
+                            )
 
-                        # ── 최종 주소 미리보기 ──
-                        preview_orig = combine_address(c["도로명주소"], detail_val)
-                        preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
-                        st.caption(f"👁️ 미리보기 — 원본: `{preview_orig}`")
-                        st.caption(f"👁️ 미리보기 — 괄호제거: `{preview_clean}`")
+                            # 미리보기
+                            preview_orig = combine_address(c["도로명주소"], detail_val)
+                            preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
+                            st.markdown(
+                                f"👁️ **원본:** `{preview_orig}`  \n"
+                                f"👁️ **괄호제거:** `{preview_clean}`"
+                            )
 
-                        # ── 넣기 버튼 (popover) ──
+                        # ── 3. 넣기 버튼 (모달 열기) ──
                         btn_a, btn_b = st.columns(2)
-
                         with btn_a:
-                            with st.popover("📥 원본 주소 넣기", use_container_width=True):
-                                st.caption("**넣을 위치를 선택하세요**")
-                                for slot_1b in range(1, MAX_ADDRESS + 1):
-                                    label, is_next = slot_label(slot_1b, next_slot_1based)
-                                    if st.button(
-                                        label,
-                                        key=f"orig_{i}_{slot_1b}",
-                                        use_container_width=True,
-                                        type="primary" if is_next else "secondary",
-                                    ):
-                                        final_val = combine_address(
-                                            c["도로명주소"],
-                                            st.session_state.get(detail_key, "")
-                                        )
-                                        fill_slot(slot_1b - 1, final_val)
-                                        st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1b}에 입력 완료: {final_val}"
-                                        )
-                                        st.rerun()
-
+                            if st.button(
+                                "📥 원본 주소 넣기",
+                                key=f"orig_btn_{i}",
+                                use_container_width=True,
+                            ):
+                                st.session_state["_picker_open"] = {
+                                    "candidate": c,
+                                    "detail_key": detail_key,
+                                    "base_key": "도로명주소",
+                                    "next_slot": next_slot_1based,
+                                }
+                                st.rerun()
                         with btn_b:
-                            with st.popover("📥 괄호 제거 주소 넣기", use_container_width=True):
-                                st.caption("**넣을 위치를 선택하세요**")
-                                for slot_1b in range(1, MAX_ADDRESS + 1):
-                                    label, is_next = slot_label(slot_1b, next_slot_1based)
-                                    if st.button(
-                                        label,
-                                        key=f"clean_{i}_{slot_1b}",
-                                        use_container_width=True,
-                                        type="primary" if is_next else "secondary",
-                                    ):
-                                        final_val = combine_address(
-                                            c["도로명주소_깔끔"],
-                                            st.session_state.get(detail_key, "")
-                                        )
-                                        fill_slot(slot_1b - 1, final_val)
-                                        st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1b}에 입력 완료: {final_val}"
-                                        )
-                                        st.rerun()
+                            if st.button(
+                                "📥 괄호 제거 주소 넣기",
+                                key=f"clean_btn_{i}",
+                                use_container_width=True,
+                            ):
+                                st.session_state["_picker_open"] = {
+                                    "candidate": c,
+                                    "detail_key": detail_key,
+                                    "base_key": "도로명주소_깔끔",
+                                    "next_slot": next_slot_1based,
+                                }
+                                st.rerun()
 
 st.markdown("---")
 
@@ -1392,4 +1408,16 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
+    )
+
+# ============================================================
+# ★ 슬롯 선택 모달 트리거 (스크립트 최하단에서 조건부 호출)
+# ============================================================
+_picker = st.session_state.pop("_picker_open", None)
+if _picker:
+    slot_picker_dialog(
+        _picker["candidate"],
+        _picker["detail_key"],
+        _picker["base_key"],
+        _picker["next_slot"],
         )
