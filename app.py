@@ -521,7 +521,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# ★ 5-1. 표제부 조회 → 주택유형 판별 (신규 추가)
+# ★ 5-1. 표제부 조회 (주택유형 판별용)
 # ============================================================
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
     """표제부(getBrTitleInfo)에서 주용도/기타용도/세대수 등 조회"""
@@ -539,6 +539,7 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                 items_sorted = sorted(items, key=lambda x: str(x.get("useAprDay", "")), reverse=True)
                 item = items_sorted[0]
                 info = {
+                    "주용도코드": item.get("mainPurpsCd", "") or "",
                     "주용도": item.get("mainPurpsCdNm", "") or "",
                     "기타용도": item.get("etcPurps", "") or "",
                     "세대수": item.get("hhldCnt", "") or "",
@@ -547,60 +548,116 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                     "사용승인일": item.get("useAprDay", "") or "",
                     "연면적": item.get("totArea", "") or "",
                     "대지면적": item.get("platArea", "") or "",
+                    "건축면적": item.get("archArea", "") or "",
                     "지상층수": item.get("grndFlrCnt", "") or "",
+                    "지하층수": item.get("ugrFlrCnt", "") or "",
                 }
                 return info, None, all_debug
     return None, "표제부 정보 없음", all_debug
 
 
-def classify_housing_type(purps, etc_purps="", hhld=""):
-    """주용도 + 기타용도 + 세대수 조합으로 주택유형 판별"""
-    p = str(purps or "").strip()
-    e = str(etc_purps or "").strip()
-    combined = p + " " + e
+def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", hhld="",
+                           grnd_flr="", plat_area="", arch_area="", ho_cnt=""):
+    """주용도코드 + 주용도명 + 층수 + 대지/건축면적 + 세대수 조합으로 주택유형 판별"""
 
-    # 세대수 기반 보조 판단
     def _to_int(v):
         try:
-            return int(str(v).replace(",", ""))
-        except (ValueError, TypeError):
+            return int(float(str(v).replace(",", "").strip()))
+        except (ValueError, TypeError, AttributeError):
             return None
-    h = _to_int(hhld)
 
-    # 1) 주용도가 명확한 경우
-    if "아파트" in p:
+    def _to_float(v):
+        try:
+            return float(str(v).replace(",", "").strip())
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    cd = str(purps_cd or "").strip()
+    nm = str(purps_nm or "").strip()
+    e = str(etc_purps or "").strip()
+    combined = f"{nm} {e}"
+
+    hhld_n = _to_int(hhld)
+    ho_n = _to_int(ho_cnt)
+    flr_n = _to_int(grnd_flr)
+    plat_n = _to_float(plat_area)
+    arch_n = _to_float(arch_area)
+
+    # ---------- 1) 주용도명에 명확한 키워드 우선 ----------
+    if "아파트" in nm:
         return "아파트"
-    if "다세대" in p:
+    if "다세대" in nm:
         return "다세대주택"
-    if "연립" in p:
+    if "연립" in nm:
         return "연립주택"
-    if "다가구" in p:
+    if "다가구" in nm:
         return "단독(다가구)주택"
-    if "단독" in p:
-        # 세대수가 2 이상이면 다가구 가능성
-        if h is not None and h >= 2:
+    if "오피스텔" in nm or "오피스텔" in e:
+        return "오피스텔(업무시설)"
+
+    # ---------- 2) 주용도코드 기반 정밀 분류 ----------
+    # 코드 02000 = 공동주택 (아파트/연립/다세대 통합)
+    if cd.startswith("02000") or cd == "02000":
+        # 층수로 1차 구분
+        if flr_n is not None:
+            if flr_n >= 5:
+                return "아파트"
+            # 4층 이하 → 연립 vs 다세대
+            # 법적 기준: 연립=바닥면적 600㎡ 초과, 다세대=600㎡ 이하
+            # 대지면적 또는 건축면적 600㎡ 기준
+            area_ref = plat_n if plat_n is not None else arch_n
+            if area_ref is not None:
+                return "연립주택" if area_ref > 600 else "다세대주택"
+            # 면적 정보 없으면 세대수로 추정
+            if hhld_n is not None:
+                return "다세대주택" if hhld_n <= 4 else "연립주택"
+            return "공동주택(층수·면적 정보 없음)"
+
+        # 층수 정보 없으면 세대수로 보조 판단
+        if hhld_n is not None:
+            if hhld_n >= 50:
+                return "아파트(추정)"
+            elif hhld_n >= 5:
+                return "연립주택(추정)"
+            else:
+                return "다세대주택(추정)"
+        return "공동주택"
+
+    # 코드 02003 = 다세대주택
+    if cd.startswith("02003") or cd == "02003":
+        return "다세대주택"
+
+    # 코드 01000 = 단독주택
+    if cd.startswith("01000") or cd == "01000":
+        if hhld_n is not None and hhld_n >= 2:
+            return "단독(다가구)주택"
+        if "다가구" in nm or "다가구" in e:
             return "단독(다가구)주택"
         return "단독주택"
-    if "공동주택" in p:
-        return "공동주택(기타)"
 
-    # 2) 기타용도에서 판단
-    if "아파트" in e:
-        return "아파트"
-    if "다세대" in e:
-        return "다세대주택"
-    if "연립" in e:
-        return "연립주택"
-    if "다가구" in e:
+    # 코드 01003 = 다가구주택
+    if cd.startswith("01003") or cd == "01003":
         return "단독(다가구)주택"
-    if "단독" in e:
-        return "단독주택"
 
-    # 3) 주거용이 아니면 그대로 표시
-    if any(k in combined for k in ("근린생활", "상가", "업무", "판매", "숙박", "공장")):
-        return p or "비주거용"
+    # 코드 14000 = 업무시설 (오피스텔)
+    if cd.startswith("14000") or cd == "14000":
+        if "오피스텔" in nm or "오피스텔" in e:
+            return "오피스텔(업무시설)"
+        return nm or "업무시설"
 
-    return p or "미분류"
+    # ---------- 3) 기타용도에서 판단 ----------
+    if "아파트" in e: return "아파트"
+    if "다세대" in e: return "다세대주택"
+    if "연립" in e: return "연립주택"
+    if "다가구" in e: return "단독(다가구)주택"
+    if "단독" in e: return "단독주택"
+    if "오피스텔" in e: return "오피스텔(업무시설)"
+
+    # ---------- 4) 비주거용 ----------
+    if any(k in combined for k in ("근린생활", "상가", "판매", "숙박", "공장")):
+        return nm or "비주거용"
+
+    return nm or "미분류"
 
 
 # ============================================================
@@ -633,14 +690,22 @@ def process_address(address, progress=None):
         if juso.get("relJibun"):
             progress.caption(f"관련지번: {juso['relJibun']}")
 
-    # ★ (1) 주택유형 먼저 조회 (전용면적 성공/실패와 무관하게)
+    # ★ (1) 주택유형 먼저 조회
     type_info, type_err, type_dbg = fetch_building_type(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"], juso=juso)
 
     if type_info:
         housing_type = classify_housing_type(
-            type_info.get("주용도", ""), type_info.get("기타용도", ""), type_info.get("세대수", ""))
+            purps_cd=type_info.get("주용도코드", ""),
+            purps_nm=type_info.get("주용도", ""),
+            etc_purps=type_info.get("기타용도", ""),
+            hhld=type_info.get("세대수", ""),
+            grnd_flr=type_info.get("지상층수", ""),
+            plat_area=type_info.get("대지면적", ""),
+            arch_area=type_info.get("건축면적", ""),
+            ho_cnt=type_info.get("호수", ""),
+        )
     else:
         housing_type = ""
 
@@ -659,7 +724,6 @@ def process_address(address, progress=None):
         "type_err": type_err,
     }
 
-    # ★ 전용면적 실패해도 주택유형은 결과에 담아서 반환
     if area:
         conf = "확정" if (target_dong and target_ho) else "추정"
         return {
@@ -770,7 +834,7 @@ if _flash:
 st.subheader("📋 전용면적 · 주택유형 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "괄호 안 추가정보(예: (중앙동, 과천 푸르지오 써밋)는 자동으로 무시됩니다. "
-           "주택유형은 건축물대장 표제부의 **주용도/기타용도/세대수**를 조합해 판별합니다.")
+           "주택유형은 건축물대장 표제부의 **주용도코드/주용도/층수/대지면적/세대수**를 조합해 판별합니다.")
 
 addresses = []
 for i in range(10):
@@ -795,7 +859,6 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
         result, dbg_bundle = process_address(address, pb)
         results.append(result)
 
-        # ★ 주택유형 + 전용면적 함께 표시
         type_txt = result.get("주택유형") or "-"
         area_txt = result.get("전용면적") or "-"
         status_txt = result.get("상태", "")
@@ -806,7 +869,6 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
                 f"📐 전용면적{'' if '[확정]' in status_txt else '(추정)'}: {area_txt} "
                 f"({status_txt})")
         else:
-            # 전용면적 실패해도 주택유형은 표시
             if type_txt and type_txt != "-":
                 st.info(f"🏢 주택유형: **{type_txt}**")
             if "호별 전유면적이" in status_txt:
@@ -823,7 +885,6 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
 
     st.markdown("---")
     st.subheader("📋 조회 결과")
-    # 컬럼 순서 정리
     df = pd.DataFrame(results)
     for col in ["주소", "전용면적", "주택유형", "상태"]:
         if col not in df.columns:
@@ -838,4 +899,4 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-    )
+                                  )
