@@ -61,6 +61,19 @@ def fill_slot(slot_idx_0based, value):
     if needed > st.session_state.address_count:
         st.session_state.address_count = needed
 
+def slot_label(slot_1based, next_slot_1based):
+    """슬롯 라벨 생성: ⭐ 추천, ✏️ 덮어쓰기"""
+    is_rec = (slot_1based == next_slot_1based)
+    has_val = bool(str(st.session_state.get(f"address_{slot_1based - 1}", "") or "").strip())
+    label = f"{'⭐ ' if is_rec else ''}주소 {slot_1based}"
+    if has_val and not is_rec:
+        label += "  ✏️ (덮어쓰기)"
+    elif has_val and is_rec:
+        label += "  (덮어쓰기)"
+    elif is_rec:
+        label += "  ← 추천"
+    return label, is_rec
+
 # ============================================================
 # 2. 파싱 유틸
 # ============================================================
@@ -1116,7 +1129,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색
+# ★ 도로명주소 검색 (popover 방식)
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1164,73 +1177,60 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                 next_slot_1based = get_next_empty_slot()
                 st.info(
                     f"⭐ **주소 {next_slot_1based}** 이 다음 빈 슬롯으로 추천됩니다. "
-                    f"(주소 1~10 어디든 선택 가능하며, 이미 값이 있는 슬롯은 **덮어쓰기** 됩니다.)"
+                    f"각 결과의 **📥 넣기** 버튼을 누르면 1~10 슬롯이 팝업으로 열립니다. "
+                    f"(이미 값이 있는 슬롯은 ✏️ 덮어쓰기)"
                 )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
-                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
-                        if c["건물명"]:
-                            st.caption(f"🏢 건물명: {c['건물명']}")
-                        if c["지번주소"]:
-                            st.caption(f"📍 지번: {c['지번주소']}")
-                        if c["동목록"]:
-                            dong_preview = c["동목록"]
-                            if len(dong_preview) > 200:
-                                dong_preview = dong_preview[:200] + "..."
-                            st.caption(f"🏠 동목록: {dong_preview}")
+                        # 결과 요약 (좌측) + 넣기 버튼 (우측)
+                        info_col, btn_col1, btn_col2 = st.columns([5, 1.2, 1.2])
 
-                        # ----- 원본 주소 버튼 (주소 1~10) -----
-                        st.caption("📥 **원본 주소** 넣을 위치 (1~10):")
-                        for row_start in (0, 5):
-                            row_cols = st.columns(5)
-                            for j in range(5):
-                                slot_i = row_start + j
-                                slot_1based = slot_i + 1
-                                is_recommended = (slot_1based == next_slot_1based)
-                                has_value = bool(
-                                    str(st.session_state.get(f"address_{slot_i}", "") or "").strip()
-                                )
-                                label = f"{'⭐ ' if is_recommended else ''}주소 {slot_1based}"
-                                if has_value and not is_recommended:
-                                    label += " ✏️"
-                                with row_cols[j]:
+                        with info_col:
+                            st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                            if c["건물명"]:
+                                st.caption(f"🏢 건물명: {c['건물명']}")
+                            if c["지번주소"]:
+                                st.caption(f"📍 지번: {c['지번주소']}")
+                            if c["동목록"]:
+                                dong_preview = c["동목록"]
+                                if len(dong_preview) > 200:
+                                    dong_preview = dong_preview[:200] + "..."
+                                st.caption(f"🏠 동목록: {dong_preview}")
+
+                        # ★ 원본 주소 넣기 (popover)
+                        with btn_col1:
+                            with st.popover("📥 원본 넣기", use_container_width=True):
+                                st.caption("**넣을 위치를 선택하세요**")
+                                for slot_1b in range(1, MAX_ADDRESS + 1):
+                                    label, is_rec = slot_label(slot_1b, next_slot_1based)
                                     if st.button(
                                         label,
-                                        key=f"orig_{i}_{slot_i}",
+                                        key=f"orig_{i}_{slot_1b}",
                                         use_container_width=True,
-                                        type="primary" if is_recommended else "secondary",
+                                        type="primary" if is_rec else "secondary",
                                     ):
-                                        fill_slot(slot_i, c["도로명주소"])
+                                        fill_slot(slot_1b - 1, c["도로명주소"])
                                         st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1based}에 입력 완료: {c['도로명주소']}"
+                                            f"✅ 주소 {slot_1b}에 입력 완료: {c['도로명주소']}"
                                         )
                                         st.rerun()
 
-                        # ----- 괄호 제거 주소 버튼 (주소 1~10) -----
-                        st.caption("📥 **괄호 제거 주소** 넣을 위치 (1~10):")
-                        for row_start in (0, 5):
-                            row_cols = st.columns(5)
-                            for j in range(5):
-                                slot_i = row_start + j
-                                slot_1based = slot_i + 1
-                                is_recommended = (slot_1based == next_slot_1based)
-                                has_value = bool(
-                                    str(st.session_state.get(f"address_{slot_i}", "") or "").strip()
-                                )
-                                label = f"{'⭐ ' if is_recommended else ''}주소 {slot_1based}"
-                                if has_value and not is_recommended:
-                                    label += " ✏️"
-                                with row_cols[j]:
+                        # ★ 괄호 제거 주소 넣기 (popover)
+                        with btn_col2:
+                            with st.popover("📥 괄호제거 넣기", use_container_width=True):
+                                st.caption("**넣을 위치를 선택하세요**")
+                                for slot_1b in range(1, MAX_ADDRESS + 1):
+                                    label, is_rec = slot_label(slot_1b, next_slot_1based)
                                     if st.button(
                                         label,
-                                        key=f"clean_{i}_{slot_i}",
+                                        key=f"clean_{i}_{slot_1b}",
                                         use_container_width=True,
-                                        type="primary" if is_recommended else "secondary",
+                                        type="primary" if is_rec else "secondary",
                                     ):
-                                        fill_slot(slot_i, c["도로명주소_깔끔"])
+                                        fill_slot(slot_1b - 1, c["도로명주소_깔끔"])
                                         st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1based}에 입력 완료: {c['도로명주소_깔끔']}"
+                                            f"✅ 주소 {slot_1b}에 입력 완료: {c['도로명주소_깔끔']}"
                                         )
                                         st.rerun()
 
@@ -1359,4 +1359,4 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                            )
+        )
