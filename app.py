@@ -1220,17 +1220,8 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                     with st.container(border=True):
                         # ── 1. 주소 정보 (최상단) ──
                         st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
-                        if c["건물명"]:
-                            st.caption(f"🏢 건물명: {c['건물명']}")
-                        if c["지번주소"]:
-                            st.caption(f"📍 지번: {c['지번주소']}")
-                        if c["동목록"]:
-                            dong_preview = c["동목록"]
-                            if len(dong_preview) > 200:
-                                dong_preview = dong_preview[:200] + "..."
-                            st.caption(f"🏠 동목록: {dong_preview}")
 
-                        # ── 2. 상세주소 입력 박스 (주소 바로 아래, 눈에 띄게) ──
+                        # ── 2. 상세주소 입력 박스 (주소 바로 아래, 건물명 위) ──
                         detail_key = f"detail_{i}"
                         with st.container(border=True):
                             st.markdown("##### 📝 상세주소 (동/호수) 입력")
@@ -1246,15 +1237,26 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 label_visibility="collapsed",
                             )
 
-                            # 미리보기
+                            # 미리보기 (📄 아이콘)
                             preview_orig = combine_address(c["도로명주소"], detail_val)
                             preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
                             st.markdown(
-                                f"👁️ **원본:** `{preview_orig}`  \n"
-                                f"👁️ **괄호제거:** `{preview_clean}`"
+                                f"📄 **원본:** `{preview_orig}`  \n"
+                                f"📄 **괄호제거:** `{preview_clean}`"
                             )
 
-                        # ── 3. 넣기 버튼 (모달 열기) ──
+                        # ── 3. 건물명 / 지번 / 동목록 (상세주소 아래로) ──
+                        if c["건물명"]:
+                            st.caption(f"🏢 건물명: {c['건물명']}")
+                        if c["지번주소"]:
+                            st.caption(f"📍 지번: {c['지번주소']}")
+                        if c["동목록"]:
+                            dong_preview = c["동목록"]
+                            if len(dong_preview) > 200:
+                                dong_preview = dong_preview[:200] + "..."
+                            st.caption(f"🏠 동목록: {dong_preview}")
+
+                        # ── 4. 넣기 버튼 (모달 열기) ──
                         btn_a, btn_b = st.columns(2)
                         with btn_a:
                             if st.button(
@@ -1420,4 +1422,4 @@ if _picker:
         _picker["detail_key"],
         _picker["base_key"],
         _picker["next_slot"],
-        )
+                )
