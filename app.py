@@ -537,10 +537,9 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# ★ 5-1. 총괄표제부 조회 (지상층수·세대수 보완용) — BUILDING_API_KEY
+# ★ 5-1. 총괄표제부 조회 (대지면적·층수·세대수 보완용)
 # ============================================================
 def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
-    """총괄표제부(getBrRecapTitleInfo) 조회 — 지상층수·세대수 보완용"""
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
 
@@ -569,7 +568,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
 
 
 # ============================================================
-# ★ 5-2. 건축인허가정보 API: 주택유형 조회 (PERMIT_API_KEY 사용)
+# ★ 5-2. 건축인허가정보 API: 주택유형 조회 (PERMIT_API_KEY)
 # ============================================================
 def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
@@ -674,17 +673,9 @@ def normalize_hstp_type(code_nm, code=""):
 
 
 # ============================================================
-# ★ 5-3. 표제부 조회 — 동 매칭 + 주거용 우선 선택 + 총괄표제부 폴백
+# ★ 5-3. 표제부 조회 — 동 매칭 + 주거용 우선 + 총괄표제부 폴백
 # ============================================================
 def _pick_best_title(all_items, target_dong, target_ho):
-    """
-    여러 표제부 중 최적 항목 선택
-    우선순위:
-      1) dongNm/bldNm에 target_dong 포함 + 주거용
-      2) dongNm/bldNm에 target_dong 포함
-      3) 주거용 중 최신
-      4) 최신
-    """
     if not all_items:
         return None
 
@@ -695,15 +686,12 @@ def _pick_best_title(all_items, target_dong, target_ho):
             return False
         d = str(item.get("dongNm", "") or "").strip()
         b = str(item.get("bldNm", "") or "").strip()
-        # dongNm이 "113" 또는 "113동"인 경우
         if d and (d == td or d == f"{td}동"):
             return True
-        # bldNm에 "113동" 또는 "113"이 포함된 경우
         if b:
             if f"{td}동" in b:
                 return True
             if td.isdigit():
-                # bldNm 내 "113" 앞뒤로 숫자가 아닌 문자
                 if re.search(rf"(?<!\d){re.escape(td)}(?!\d)", b):
                     return True
         return False
@@ -720,32 +708,27 @@ def _pick_best_title(all_items, target_dong, target_ho):
     def _use_day(item):
         return str(item.get("useAprDay", "") or "")
 
-    # 1순위
     matched_dong = [it for it in all_items if _match_dong(it)]
     if matched_dong:
         residential = [it for it in matched_dong if _is_residential(it)]
         chosen_list = residential if residential else matched_dong
         return sorted(chosen_list, key=_use_day, reverse=True)[0]
 
-    # 2순위: 주거용
     residential_all = [it for it in all_items if _is_residential(it)]
     if residential_all:
         return sorted(residential_all, key=_use_day, reverse=True)[0]
 
-    # 3순위: 최신
     return sorted(all_items, key=_use_day, reverse=True)[0]
 
 
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
                         target_dong="", target_ho=""):
-    """표제부(getBrTitleInfo) — 동 매칭 + 주거용 우선 선택 + 총괄표제부 폴백"""
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     plat_candidates = [platGbCd] + [p for p in ("0", "1", "2") if p != platGbCd]
 
     all_debug = []
     all_items_collected = []
 
-    # ---------- 1차: 표제부(getBrTitleInfo) ----------
     for bd in bjdong_variants:
         for pg in plat_candidates:
             items, err, dbg = call_api_all_pages(
@@ -760,7 +743,6 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
     if not all_items_collected:
         return None, "표제부 정보 없음", all_debug
 
-    # ★ 최적 항목 선택 (동 매칭 + 주거용 우선)
     chosen = _pick_best_title(all_items_collected, target_dong, target_ho)
     if chosen is None:
         return None, "표제부 선택 실패", all_debug
@@ -782,7 +764,6 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
         "지하층수": chosen.get("ugrFlrCnt", "") or "",
     }
 
-    # 표제부 후보 요약 (디버그용)
     all_debug.append({
         "endpoint": "getBrTitleInfo",
         "note": "candidates_summary",
@@ -801,17 +782,24 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
             "bldNm": info["건물명"],
             "주용도": info["주용도"],
             "주용도코드": info["주용도코드"],
+            "대지면적": info["대지면적"],
         },
     })
 
-    # ★ 정보 부족 시 총괄표제부 폴백
-    if not info["지상층수"] or not info["세대수"]:
+    need_fallback = (
+        not info["지상층수"] or
+        not info["세대수"] or
+        not info["대지면적"] or
+        str(info["대지면적"]).strip() in ("0", "0.0", "0.00")
+    )
+    if need_fallback:
         recap, recap_dbg = _fetch_recap_title(
             sigunguCd, bjdongCd, bun, ji, platGbCd, juso)
         all_debug.extend(recap_dbg)
         if recap:
             for k, v in recap.items():
-                if not info.get(k):
+                cur = info.get(k, "")
+                if not cur or str(cur).strip() in ("0", "0.0", "0.00"):
                     info[k] = v
 
     return info, None, all_debug
@@ -853,7 +841,6 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     has_villa_kw = any(k in bn for k in VILLA_LIKE_KEYWORDS)
     has_apt_kw = any(k in bn for k in APARTMENT_BRAND_KEYWORDS)
 
-    # ---------- 1) 주용도코드 최우선 매칭 ----------
     if cd == "02001":
         return "아파트"
     if cd == "02002":
@@ -873,7 +860,6 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
             return "오피스텔(업무시설)"
         return nm or "업무시설"
 
-    # ---------- 2) 주용도명 키워드 ----------
     if "아파트" in nm:
         return "아파트"
     if "다세대" in nm:
@@ -885,7 +871,6 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     if "오피스텔" in nm or "오피스텔" in e or "오피스텔" in bn:
         return "오피스텔(업무시설)"
 
-    # ---------- 3) 코드 02000 (공동주택 통합) 정밀 판별 ----------
     if cd.startswith("02000") or "공동주택" in nm or "공동주택" in e:
         if has_villa_kw and not has_apt_kw:
             if flr_n is not None and flr_n <= 4:
@@ -924,7 +909,6 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
             return "아파트(추정)"
         return "공동주택(정보부족)"
 
-    # ---------- 4) 기타용도 ----------
     if "아파트" in e: return "아파트"
     if "다세대" in e: return "다세대주택"
     if "연립" in e: return "연립주택"
@@ -932,9 +916,7 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     if "단독" in e: return "단독주택"
     if "오피스텔" in e: return "오피스텔(업무시설)"
 
-    # ---------- 5) 비주거용 ----------
     if any(k in combined for k in ("근린생활", "상가", "판매", "숙박", "공장", "업무시설")):
-        # 건물명에 아파트 브랜드가 있으면 주상복합 → 아파트로 추정
         if has_apt_kw or "아파트" in bn or "센트라스" in bn:
             return "아파트(주상복합 추정)"
         return nm or "비주거용"
@@ -974,18 +956,15 @@ def process_address(address, progress=None):
         if juso.get("relJibun"):
             progress.caption(f"관련지번: {juso['relJibun']}")
 
-    # ★ (1) 건축인허가정보 API (PERMIT_API_KEY)
     permit_info, permit_err, permit_dbg = fetch_housing_type_from_permit(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"])
 
-    # ★ (2) 표제부 조회 — 동 매칭 + 주거용 우선 선택
     type_info, type_err, type_dbg = fetch_building_type(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"], juso=juso,
         target_dong=target_dong, target_ho=target_ho)
 
-    # ★ (3) 주택유형 판별
     housing_type = ""
     housing_type_source = ""
 
@@ -996,7 +975,6 @@ def process_address(address, progress=None):
         )
         housing_type_source = "인허가API"
 
-    # ★ 인허가 API가 "공동주택"이거나 결과 없거나 "비주거"면 표제부 기반 재판별
     if housing_type in ("공동주택", "") or any(
             k in housing_type for k in ("판매", "근린", "상가", "숙박", "공장")) and type_info:
         housing_type = classify_housing_type(
@@ -1014,7 +992,6 @@ def process_address(address, progress=None):
         )
         housing_type_source = "표제부기반"
 
-    # ★ (4) 단독주택이면 표제부 연면적 + 대지면적 반환
     is_single_house = housing_type in ("단독주택", "단독(다가구)주택")
     if is_single_house and type_info:
         tot = type_info.get("연면적", "")
@@ -1023,12 +1000,12 @@ def process_address(address, progress=None):
         tot_str = ""
         plat_str = ""
         try:
-            if tot:
+            if tot and str(tot).strip() not in ("0", "0.0", "0.00"):
                 tot_str = f"{float(str(tot).replace(',', '')):.2f}㎡ (연면적)"
         except (ValueError, TypeError):
             pass
         try:
-            if plat:
+            if plat and str(plat).strip() not in ("0", "0.0", "0.00"):
                 plat_str = f"{float(str(plat).replace(',', '')):.2f}㎡"
         except (ValueError, TypeError):
             pass
@@ -1050,7 +1027,6 @@ def process_address(address, progress=None):
             "상태": f"단독주택 연면적 반환 (사용승인일: {type_info.get('사용승인일', '-')})",
         }, debug_bundle
 
-    # ★ (5) 공동주택이면 전유부에서 호별 전용면적 조회
     area, status, errors, api_debug = find_dedicated_area(
         juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"],
         juso["platGbCd"], target_dong, target_ho, juso=juso,
@@ -1080,14 +1056,13 @@ def process_address(address, progress=None):
             "상태": f"{status} [{conf}]",
         }, debug_bundle
 
-    # 폴백: 표제부 연면적
     if type_info and type_info.get("연면적"):
         try:
             tot_val = float(str(type_info["연면적"]).replace(",", ""))
             plat_val = type_info.get("대지면적", "")
             plat_str = ""
             try:
-                if plat_val:
+                if plat_val and str(plat_val).strip() not in ("0", "0.0", "0.00"):
                     plat_str = f"{float(str(plat_val).replace(',', '')):.2f}㎡"
             except (ValueError, TypeError):
                 pass
@@ -1208,16 +1183,63 @@ st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "주택유형은 **건축인허가정보 API(1순위) + 건축물대장 표제부(동 매칭) + 총괄표제부(보완)** 를 조합해 판별합니다. "
            "단독주택은 표제부 **연면적과 대지면적**을 함께 반환합니다.")
 
+# ============================================================
+# ★ 주소 입력 개수 관리 (동적 1 ~ 10개)
+# ============================================================
+if "address_count" not in st.session_state:
+    st.session_state.address_count = 1
+
+MAX_ADDRESS = 10
+
+ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
+
+with ctrl_col1:
+    if st.button(
+        "➕ 주소 추가",
+        disabled=(st.session_state.address_count >= MAX_ADDRESS),
+        use_container_width=True,
+        key="btn_add_addr",
+    ):
+        st.session_state.address_count += 1
+        st.rerun()
+
+with ctrl_col2:
+    if st.button(
+        "➖ 마지막 삭제",
+        disabled=(st.session_state.address_count <= 1),
+        use_container_width=True,
+        key="btn_remove_addr",
+    ):
+        remove_idx = st.session_state.address_count - 1
+        st.session_state.pop(f"address_{remove_idx}", None)
+        st.session_state.address_count -= 1
+        st.rerun()
+
+with ctrl_col3:
+    do_query = st.button(
+        "🔎 조회",
+        type="primary",
+        use_container_width=True,
+        key="btn_query_top",
+    )
+
+st.caption(
+    f"현재 입력칸: **{st.session_state.address_count} / {MAX_ADDRESS}** 개  "
+    f"({'최대치 도달' if st.session_state.address_count >= MAX_ADDRESS else '➕ 버튼으로 추가 가능'})"
+)
+
 addresses = []
-for i in range(10):
+for i in range(st.session_state.address_count):
     address = st.text_input(
         f"주소 {i + 1}",
         key=f"address_{i}",
-        placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호"
+        placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호",
     )
     addresses.append(address.strip())
 
-if st.button("🔎 조회", type="primary", use_container_width=True):
+st.markdown("---")
+
+if do_query:
     targets = [x for x in addresses if x]
     if not targets:
         st.warning("주소를 하나 이상 입력해주세요.")
@@ -1280,4 +1302,4 @@ if st.button("🔎 조회", type="primary", use_container_width=True):
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-    )
+                       )
