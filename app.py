@@ -1196,7 +1196,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.session_state.search_candidates = candidates
             st.session_state.search_error = err
             st.session_state.search_performed = True
-            st.session_state.show_search_results = True  # 새 검색 시 자동 펼침
+            st.session_state.show_search_results = True
 
     if st.session_state.search_performed:
         err = st.session_state.search_error
@@ -1207,7 +1207,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         elif not candidates:
             st.info("검색 결과가 없습니다.")
         else:
-            # ---------- 상단 헤더 (개수 + 전체 접기/펼치기) ----------
             head_col1, head_col2 = st.columns([4, 1])
             with head_col1:
                 st.markdown(f"### 🔍 총 {len(candidates)}건 검색됨")
@@ -1216,48 +1215,35 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                     "🔼 결과 접기" if st.session_state.show_search_results
                     else "🔽 결과 펼치기"
                 )
-                if st.button(
-                    toggle_label,
-                    use_container_width=True,
-                    key="toggle_search_top",
-                ):
+                if st.button(toggle_label, use_container_width=True, key="toggle_search_top"):
                     st.session_state.show_search_results = not st.session_state.show_search_results
                     st.rerun()
 
-            # ---------- 검색 결과 목록 ----------
             if st.session_state.show_search_results:
                 next_slot_1based = get_next_empty_slot()
                 st.info(
                     f"**⭐ 주소 {next_slot_1based} (다음 빈슬롯)** 이 기본 선택됩니다. "
                     f"각 결과의 **📝 상세주소(동/호)** 를 입력한 뒤 "
                     f"**📥 원본 주소 넣기** 또는 **📥 괄호 제거 주소 넣기** 버튼을 눌러주세요. "
-                    f"슬롯을 선택하면 팝업이 자동으로 닫힙니다. "
-                    f"**🔽 접기 버튼**으로 스크롤 위치에서 바로 접을 수 있습니다."
+                    f"슬롯을 선택하면 팝업이 자동으로 닫힙니다."
                 )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
-                        # ── 카드 상단: 주소 정보 (좌) + 🔽 접기 버튼 (우) ──
                         top_left, top_right = st.columns([5, 1])
                         with top_left:
                             st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
                         with top_right:
-                            if st.button(
-                                "🔽 접기",
-                                key=f"collapse_card_{i}",
-                                use_container_width=True,
-                            ):
+                            if st.button("🔽 접기", key=f"collapse_card_{i}", use_container_width=True):
                                 st.session_state.show_search_results = False
                                 st.rerun()
 
-                        # ── 상세주소 입력 박스 ──
                         detail_key = f"detail_{i}"
                         with st.container(border=True):
                             st.markdown("##### 📝 상세주소 (동/호수) 입력")
                             st.caption(
                                 "동/호수를 입력하면 아래 **📥 넣기** 버튼 클릭 시 "
-                                "**기본주소 뒤에 자동으로 붙어서** 입력됩니다. "
-                                "(비워두면 기본주소만 입력)"
+                                "**기본주소 뒤에 자동으로 붙어서** 입력됩니다."
                             )
                             detail_val = st.text_input(
                                 "상세주소",
@@ -1265,7 +1251,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 placeholder="예: 113동 401호",
                                 label_visibility="collapsed",
                             )
-
                             preview_orig = combine_address(c["도로명주소"], detail_val)
                             preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
                             st.markdown(
@@ -1273,7 +1258,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 f"📄 **괄호제거:** `{preview_clean}`"
                             )
 
-                        # ── 건물명 / 지번 / 동목록 ──
                         if c["건물명"]:
                             st.caption(f"🏢 건물명: {c['건물명']}")
                         if c["지번주소"]:
@@ -1284,14 +1268,9 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 dong_preview = dong_preview[:200] + "..."
                             st.caption(f"🏠 동목록: {dong_preview}")
 
-                        # ── 넣기 버튼 (모달 열기) ──
                         btn_a, btn_b = st.columns(2)
                         with btn_a:
-                            if st.button(
-                                "📥 원본 주소 넣기",
-                                key=f"orig_btn_{i}",
-                                use_container_width=True,
-                            ):
+                            if st.button("📥 원본 주소 넣기", key=f"orig_btn_{i}", use_container_width=True):
                                 st.session_state["_picker_open"] = {
                                     "candidate": c,
                                     "detail_key": detail_key,
@@ -1300,11 +1279,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 }
                                 st.rerun()
                         with btn_b:
-                            if st.button(
-                                "📥 괄호 제거 주소 넣기",
-                                key=f"clean_btn_{i}",
-                                use_container_width=True,
-                            ):
+                            if st.button("📥 괄호 제거 주소 넣기", key=f"clean_btn_{i}", use_container_width=True):
                                 st.session_state["_picker_open"] = {
                                     "candidate": c,
                                     "detail_key": detail_key,
@@ -1314,8 +1289,8 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 st.rerun()
             else:
                 st.info(
-                    f"🔽 검색 결과가 접혀 있습니다. "
-                    f"위 **🔽 결과 펼치기** 버튼 또는 새로 검색하면 다시 표시됩니다."
+                    "🔽 검색 결과가 접혀 있습니다. "
+                    "위 **🔽 결과 펼치기** 버튼 또는 새로 검색하면 다시 표시됩니다."
                 )
 
 st.markdown("---")
@@ -1378,6 +1353,10 @@ st.caption(
     f"({'최대치 도달' if st.session_state.address_count >= MAX_ADDRESS else '➕ 버튼으로 추가 가능'})"
 )
 
+# ★ 조회 버튼 바로 아래 로딩/요약 표시 자리
+loading_slot = st.empty()
+summary_slot = st.empty()
+
 st.markdown("---")
 
 if do_query:
@@ -1386,13 +1365,70 @@ if do_query:
         st.warning("주소를 하나 이상 입력해주세요.")
         st.stop()
 
-    st.markdown("---")
+    spinner_frames = ["⏳", "⌛", "⏰", "🕐", "🕑", "🕒", "🕓", "🕔", "🕕",
+                      "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+
+    total = len(targets)
     results = []
+    success_count = 0
+    error_count = 0
+
     for idx, address in enumerate(targets, start=1):
+        # ★ 로딩 표시 업데이트
+        frame = spinner_frames[(idx - 1) % len(spinner_frames)]
+        loading_slot.markdown(
+            f"""
+            <style>
+              @keyframes blinkPulse {{
+                0%   {{ opacity: 1;   box-shadow: 0 0 12px rgba(255,140,0,0.85); }}
+                50%  {{ opacity: 0.55; box-shadow: 0 0 4px rgba(255,140,0,0.3); }}
+                100% {{ opacity: 1;   box-shadow: 0 0 12px rgba(255,140,0,0.85); }}
+              }}
+              .loading-box {{
+                background: linear-gradient(90deg, #ff9a00, #ff6a00);
+                color: #ffffff;
+                padding: 14px 20px;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 1.15rem;
+                animation: blinkPulse 1.2s ease-in-out infinite;
+              }}
+              .loading-addr {{
+                display: block;
+                margin-top: 6px;
+                font-weight: normal;
+                font-size: 0.92rem;
+                opacity: 0.95;
+              }}
+              .loading-progress {{
+                display: inline-block;
+                background: rgba(255,255,255,0.25);
+                padding: 2px 10px;
+                border-radius: 12px;
+                margin-left: 8px;
+                font-size: 0.95rem;
+              }}
+            </style>
+            <div class='loading-box'>
+              {frame} 조회 중...
+              <span class='loading-progress'>{idx} / {total} 건</span>
+              <span class='loading-addr'>📍 {address}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         st.markdown(f"### {idx}. {address}")
         pb = st.empty()
         result, dbg_bundle = process_address(address, pb)
         results.append(result)
+
+        has_area = bool(result.get("전용면적"))
+        has_type = bool(result.get("주택유형")) and result.get("주택유형") != "-"
+        if has_area or has_type:
+            success_count += 1
+        else:
+            error_count += 1
 
         type_txt = result.get("주택유형") or "-"
         area_txt = result.get("전용면적") or "-"
@@ -1427,6 +1463,49 @@ if do_query:
                 st.json(dbg_bundle)
         time.sleep(0.5)
 
+    # ★ 로딩 제거 + 완료 요약 배너
+    loading_slot.empty()
+
+    if error_count == 0:
+        summary_slot.markdown(
+            f"""
+            <div style='background: linear-gradient(90deg, #28a745, #34ce57);
+                        color: white; padding: 16px 22px; border-radius: 10px;
+                        font-weight: bold; font-size: 1.15rem;
+                        box-shadow: 0 4px 14px rgba(40,167,69,0.45);
+                        text-align: center;'>
+              ✅ {total}건 조회 완료
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif success_count == 0:
+        summary_slot.markdown(
+            f"""
+            <div style='background: linear-gradient(90deg, #dc3545, #e4606d);
+                        color: white; padding: 16px 22px; border-radius: 10px;
+                        font-weight: bold; font-size: 1.15rem;
+                        box-shadow: 0 4px 14px rgba(220,53,69,0.45);
+                        text-align: center;'>
+              ⚠️ {total}건 조회 오류
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        summary_slot.markdown(
+            f"""
+            <div style='background: linear-gradient(90deg, #17a2b8, #48c6dc);
+                        color: white; padding: 16px 22px; border-radius: 10px;
+                        font-weight: bold; font-size: 1.15rem;
+                        box-shadow: 0 4px 14px rgba(23,162,184,0.45);
+                        text-align: center;'>
+              ✅ {success_count}건 조회 완료&nbsp;&nbsp;|&nbsp;&nbsp;⚠️ {error_count}건 조회 오류
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
     st.subheader("📋 조회 결과")
     df = pd.DataFrame(results)
@@ -1446,7 +1525,7 @@ if do_query:
     )
 
 # ============================================================
-# ★ 슬롯 선택 모달 트리거 (스크립트 최하단에서 조건부 호출)
+# ★ 슬롯 선택 모달 트리거
 # ============================================================
 _picker = st.session_state.pop("_picker_open", None)
 if _picker:
