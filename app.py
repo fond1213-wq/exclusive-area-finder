@@ -27,10 +27,8 @@ PERMIT_API_KEY_DECODED = urllib.parse.unquote(PERMIT_API_KEY_RAW)
 
 JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
-# ★ 디버그 모드 기본값 False (앱 시작 시 접힘)
 DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=False)
 
-# ★ 세션 상태 초기화 (주소 입력칸 개수)
 if "address_count" not in st.session_state:
     st.session_state.address_count = 1
 MAX_ADDRESS = 10
@@ -44,6 +42,24 @@ APARTMENT_BRAND_KEYWORDS = (
     "포레온", "올림픽파크", "센트라스", "파크",
 )
 VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
+
+# ============================================================
+# ★ 슬롯 유틸
+# ============================================================
+def get_next_empty_slot():
+    """1-based 다음 빈 슬롯 번호 (1~10). 모두 채워져 있으면 10 반환."""
+    for i in range(MAX_ADDRESS):
+        val = str(st.session_state.get(f"address_{i}", "") or "").strip()
+        if not val:
+            return i + 1
+    return MAX_ADDRESS
+
+def fill_slot(slot_idx_0based, value):
+    """0-based 슬롯 인덱스에 값 채우기. 필요 시 address_count 확장."""
+    st.session_state[f"address_{slot_idx_0based}"] = value
+    needed = slot_idx_0based + 1
+    if needed > st.session_state.address_count:
+        st.session_state.address_count = needed
 
 # ============================================================
 # 2. 파싱 유틸
@@ -574,7 +590,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
 
 
 # ============================================================
-# ★ 5-2. 건축인허가정보 API: 주택유형 조회
+# ★ 5-2. 건축인허가정보 API
 # ============================================================
 def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
@@ -1100,7 +1116,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색 (검색 결과 접기/펼치기 지원)
+# ★ 도로명주소 검색
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1141,13 +1157,15 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         elif not candidates:
             st.info("검색 결과가 없습니다.")
         else:
-            # ★ 검색 결과를 접을 수 있는 expander로 감쌈
             with st.expander(
                 f"🔍 총 {len(candidates)}건 검색됨  (클릭하여 접기/펼치기)",
                 expanded=True
             ):
-                slot_count = st.session_state.address_count
-                st.caption(f"💡 각 결과 하단의 버튼으로 **현재 열려있는 주소 입력칸(1~{slot_count})** 중 원하는 위치에 넣을 수 있습니다.")
+                next_slot_1based = get_next_empty_slot()
+                st.info(
+                    f"⭐ **주소 {next_slot_1based}** 이 다음 빈 슬롯으로 추천됩니다. "
+                    f"(주소 1~10 어디든 선택 가능하며, 이미 값이 있는 슬롯은 **덮어쓰기** 됩니다.)"
+                )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
@@ -1162,37 +1180,59 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 dong_preview = dong_preview[:200] + "..."
                             st.caption(f"🏠 동목록: {dong_preview}")
 
-                        # ★ 원본 주소 → 각 입력칸에 넣기 버튼
-                        st.caption("📥 **원본 주소** 넣을 위치:")
-                        cols_orig = st.columns(min(slot_count, 5))
-                        for slot_idx in range(slot_count):
-                            with cols_orig[slot_idx % 5]:
-                                if st.button(
-                                    f"주소 {slot_idx + 1}",
-                                    key=f"orig_{i}_{slot_idx}",
-                                    use_container_width=True,
-                                ):
-                                    st.session_state[f"address_{slot_idx}"] = c["도로명주소"]
-                                    st.session_state["_flash_msg"] = (
-                                        f"✅ 주소 {slot_idx + 1}에 입력 완료: {c['도로명주소']}"
-                                    )
-                                    st.rerun()
+                        # ----- 원본 주소 버튼 (주소 1~10) -----
+                        st.caption("📥 **원본 주소** 넣을 위치 (1~10):")
+                        for row_start in (0, 5):
+                            row_cols = st.columns(5)
+                            for j in range(5):
+                                slot_i = row_start + j
+                                slot_1based = slot_i + 1
+                                is_recommended = (slot_1based == next_slot_1based)
+                                has_value = bool(
+                                    str(st.session_state.get(f"address_{slot_i}", "") or "").strip()
+                                )
+                                label = f"{'⭐ ' if is_recommended else ''}주소 {slot_1based}"
+                                if has_value and not is_recommended:
+                                    label += " ✏️"
+                                with row_cols[j]:
+                                    if st.button(
+                                        label,
+                                        key=f"orig_{i}_{slot_i}",
+                                        use_container_width=True,
+                                        type="primary" if is_recommended else "secondary",
+                                    ):
+                                        fill_slot(slot_i, c["도로명주소"])
+                                        st.session_state["_flash_msg"] = (
+                                            f"✅ 주소 {slot_1based}에 입력 완료: {c['도로명주소']}"
+                                        )
+                                        st.rerun()
 
-                        # ★ 괄호 제거 주소 → 각 입력칸에 넣기 버튼
-                        st.caption("📥 **괄호 제거 주소** 넣을 위치:")
-                        cols_clean = st.columns(min(slot_count, 5))
-                        for slot_idx in range(slot_count):
-                            with cols_clean[slot_idx % 5]:
-                                if st.button(
-                                    f"주소 {slot_idx + 1}",
-                                    key=f"clean_{i}_{slot_idx}",
-                                    use_container_width=True,
-                                ):
-                                    st.session_state[f"address_{slot_idx}"] = c["도로명주소_깔끔"]
-                                    st.session_state["_flash_msg"] = (
-                                        f"✅ 주소 {slot_idx + 1}에 입력 완료: {c['도로명주소_깔끔']}"
-                                    )
-                                    st.rerun()
+                        # ----- 괄호 제거 주소 버튼 (주소 1~10) -----
+                        st.caption("📥 **괄호 제거 주소** 넣을 위치 (1~10):")
+                        for row_start in (0, 5):
+                            row_cols = st.columns(5)
+                            for j in range(5):
+                                slot_i = row_start + j
+                                slot_1based = slot_i + 1
+                                is_recommended = (slot_1based == next_slot_1based)
+                                has_value = bool(
+                                    str(st.session_state.get(f"address_{slot_i}", "") or "").strip()
+                                )
+                                label = f"{'⭐ ' if is_recommended else ''}주소 {slot_1based}"
+                                if has_value and not is_recommended:
+                                    label += " ✏️"
+                                with row_cols[j]:
+                                    if st.button(
+                                        label,
+                                        key=f"clean_{i}_{slot_i}",
+                                        use_container_width=True,
+                                        type="primary" if is_recommended else "secondary",
+                                    ):
+                                        fill_slot(slot_i, c["도로명주소_깔끔"])
+                                        st.session_state["_flash_msg"] = (
+                                            f"✅ 주소 {slot_1based}에 입력 완료: {c['도로명주소_깔끔']}"
+                                        )
+                                        st.rerun()
 
 st.markdown("---")
 
@@ -1319,4 +1359,4 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                               )
+                            )
