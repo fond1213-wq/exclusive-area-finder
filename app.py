@@ -62,18 +62,26 @@ def fill_slot(slot_idx_0based, value):
         st.session_state.address_count = needed
 
 def slot_label(slot_1based, next_slot_1based):
-    """슬롯 라벨 생성: ☆ 다음 빈슬롯, ✏️ 덮어쓰기"""
+    """슬롯 라벨: ⭐ 다음 빈슬롯, ✏️ 덮어쓰기"""
     is_next = (slot_1based == next_slot_1based)
     has_val = bool(
         str(st.session_state.get(f"address_{slot_1based - 1}", "") or "").strip()
     )
     if is_next and has_val:
-        return f"☆ 주소 {slot_1based} (다음 빈슬롯 · 덮어쓰기)", True
+        return f"⭐ 주소 {slot_1based} (다음 빈슬롯 · 덮어쓰기)", True
     if is_next:
-        return f"☆ 주소 {slot_1based} (다음 빈슬롯)", True
+        return f"⭐ 주소 {slot_1based} (다음 빈슬롯)", True
     if has_val:
         return f"주소 {slot_1based} ✏️ (덮어쓰기)", False
     return f"주소 {slot_1based}", False
+
+def combine_address(base, detail):
+    """기본주소 + 상세주소 결합"""
+    b = str(base or "").strip()
+    d = str(detail or "").strip()
+    if not d:
+        return b
+    return f"{b} {d}"
 
 # ============================================================
 # 2. 파싱 유틸
@@ -1130,7 +1138,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색 (popover 방식)
+# ★ 도로명주소 검색 (popover + 상세주소 입력)
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1177,13 +1185,15 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             ):
                 next_slot_1based = get_next_empty_slot()
                 st.info(
-                    f"**☆ 주소 {next_slot_1based} (다음 빈슬롯)** 이 기본 선택됩니다. "
-                    f"각 결과의 **📥 원본 주소 넣기** 또는 **📥 괄호 제거 주소 넣기** 버튼을 누르면 "
-                    f"1~10 슬롯이 팝업으로 열립니다. (이미 값이 있는 슬롯은 ✏️ 덮어쓰기)"
+                    f"**⭐ 주소 {next_slot_1based} (다음 빈슬롯)** 이 기본 선택됩니다. "
+                    f"각 결과에서 **📝 상세주소(동/호)** 를 입력한 뒤 "
+                    f"**📥 원본 주소 넣기** 또는 **📥 괄호 제거 주소 넣기** 버튼을 눌러주세요. "
+                    f"(이미 값이 있는 슬롯은 ✏️ 덮어쓰기)"
                 )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
+                        # ── 상단: 주소 정보 (좌) / 버튼 2개 (우) ──
                         info_col, btn_col1, btn_col2 = st.columns([5, 1.3, 1.4])
 
                         with info_col:
@@ -1198,7 +1208,24 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                     dong_preview = dong_preview[:200] + "..."
                                 st.caption(f"🏠 동목록: {dong_preview}")
 
-                        with btn_col1:
+                        # ── 상세주소 입력칸 (하단 전폭) ──
+                        detail_key = f"detail_{i}"
+                        detail_val = st.text_input(
+                            "📝 상세주소 (동/호수) — 아래 넣기 버튼 클릭 시 함께 입력됩니다",
+                            key=detail_key,
+                            placeholder="예: 113동 401호  (비워두면 기본주소만 입력)",
+                        )
+
+                        # ── 최종 주소 미리보기 ──
+                        preview_orig = combine_address(c["도로명주소"], detail_val)
+                        preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
+                        st.caption(f"👁️ 미리보기 — 원본: `{preview_orig}`")
+                        st.caption(f"👁️ 미리보기 — 괄호제거: `{preview_clean}`")
+
+                        # ── 넣기 버튼 (popover) ──
+                        btn_a, btn_b = st.columns(2)
+
+                        with btn_a:
                             with st.popover("📥 원본 주소 넣기", use_container_width=True):
                                 st.caption("**넣을 위치를 선택하세요**")
                                 for slot_1b in range(1, MAX_ADDRESS + 1):
@@ -1209,13 +1236,17 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                         use_container_width=True,
                                         type="primary" if is_next else "secondary",
                                     ):
-                                        fill_slot(slot_1b - 1, c["도로명주소"])
+                                        final_val = combine_address(
+                                            c["도로명주소"],
+                                            st.session_state.get(detail_key, "")
+                                        )
+                                        fill_slot(slot_1b - 1, final_val)
                                         st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1b}에 입력 완료: {c['도로명주소']}"
+                                            f"✅ 주소 {slot_1b}에 입력 완료: {final_val}"
                                         )
                                         st.rerun()
 
-                        with btn_col2:
+                        with btn_b:
                             with st.popover("📥 괄호 제거 주소 넣기", use_container_width=True):
                                 st.caption("**넣을 위치를 선택하세요**")
                                 for slot_1b in range(1, MAX_ADDRESS + 1):
@@ -1226,9 +1257,13 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                         use_container_width=True,
                                         type="primary" if is_next else "secondary",
                                     ):
-                                        fill_slot(slot_1b - 1, c["도로명주소_깔끔"])
+                                        final_val = combine_address(
+                                            c["도로명주소_깔끔"],
+                                            st.session_state.get(detail_key, "")
+                                        )
+                                        fill_slot(slot_1b - 1, final_val)
                                         st.session_state["_flash_msg"] = (
-                                            f"✅ 주소 {slot_1b}에 입력 완료: {c['도로명주소_깔끔']}"
+                                            f"✅ 주소 {slot_1b}에 입력 완료: {final_val}"
                                         )
                                         st.rerun()
 
@@ -1357,4 +1392,4 @@ if do_query:
         file_name="전용면적_주택유형_조회결과.csv",
         mime="text/csv",
         use_container_width=True
-                            )
+        )
