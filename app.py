@@ -1163,7 +1163,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색 (모달 방식 + 상세주소 입력 박스)
+# ★ 도로명주소 검색 (커스텀 접기/펼치기 + 카드별 접기 버튼)
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1174,6 +1174,8 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         st.session_state.search_error = None
     if "search_performed" not in st.session_state:
         st.session_state.search_performed = False
+    if "show_search_results" not in st.session_state:
+        st.session_state.show_search_results = True
 
     col1, col2 = st.columns([4, 1])
     with col1:
@@ -1194,6 +1196,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.session_state.search_candidates = candidates
             st.session_state.search_error = err
             st.session_state.search_performed = True
+            st.session_state.show_search_results = True  # 새 검색 시 자동 펼침
 
     if st.session_state.search_performed:
         err = st.session_state.search_error
@@ -1204,24 +1207,50 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
         elif not candidates:
             st.info("검색 결과가 없습니다.")
         else:
-            with st.expander(
-                f"🔍 총 {len(candidates)}건 검색됨  (클릭하여 접기/펼치기)",
-                expanded=True
-            ):
+            # ---------- 상단 헤더 (개수 + 전체 접기/펼치기) ----------
+            head_col1, head_col2 = st.columns([4, 1])
+            with head_col1:
+                st.markdown(f"### 🔍 총 {len(candidates)}건 검색됨")
+            with head_col2:
+                toggle_label = (
+                    "🔼 결과 접기" if st.session_state.show_search_results
+                    else "🔽 결과 펼치기"
+                )
+                if st.button(
+                    toggle_label,
+                    use_container_width=True,
+                    key="toggle_search_top",
+                ):
+                    st.session_state.show_search_results = not st.session_state.show_search_results
+                    st.rerun()
+
+            # ---------- 검색 결과 목록 ----------
+            if st.session_state.show_search_results:
                 next_slot_1based = get_next_empty_slot()
                 st.info(
                     f"**⭐ 주소 {next_slot_1based} (다음 빈슬롯)** 이 기본 선택됩니다. "
                     f"각 결과의 **📝 상세주소(동/호)** 를 입력한 뒤 "
                     f"**📥 원본 주소 넣기** 또는 **📥 괄호 제거 주소 넣기** 버튼을 눌러주세요. "
-                    f"슬롯을 선택하면 팝업이 자동으로 닫힙니다."
+                    f"슬롯을 선택하면 팝업이 자동으로 닫힙니다. "
+                    f"**🔽 접기 버튼**으로 스크롤 위치에서 바로 접을 수 있습니다."
                 )
 
                 for i, c in enumerate(candidates, start=1):
                     with st.container(border=True):
-                        # ── 1. 주소 정보 (최상단) ──
-                        st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                        # ── 카드 상단: 주소 정보 (좌) + 🔽 접기 버튼 (우) ──
+                        top_left, top_right = st.columns([5, 1])
+                        with top_left:
+                            st.markdown(f"**{i}. {c['도로명주소']}**  `{c['우편번호']}`")
+                        with top_right:
+                            if st.button(
+                                "🔽 접기",
+                                key=f"collapse_card_{i}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.show_search_results = False
+                                st.rerun()
 
-                        # ── 2. 상세주소 입력 박스 (주소 바로 아래, 건물명 위) ──
+                        # ── 상세주소 입력 박스 ──
                         detail_key = f"detail_{i}"
                         with st.container(border=True):
                             st.markdown("##### 📝 상세주소 (동/호수) 입력")
@@ -1237,7 +1266,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 label_visibility="collapsed",
                             )
 
-                            # 미리보기 (📄 아이콘)
                             preview_orig = combine_address(c["도로명주소"], detail_val)
                             preview_clean = combine_address(c["도로명주소_깔끔"], detail_val)
                             st.markdown(
@@ -1245,7 +1273,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 f"📄 **괄호제거:** `{preview_clean}`"
                             )
 
-                        # ── 3. 건물명 / 지번 / 동목록 (상세주소 아래로) ──
+                        # ── 건물명 / 지번 / 동목록 ──
                         if c["건물명"]:
                             st.caption(f"🏢 건물명: {c['건물명']}")
                         if c["지번주소"]:
@@ -1256,7 +1284,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                 dong_preview = dong_preview[:200] + "..."
                             st.caption(f"🏠 동목록: {dong_preview}")
 
-                        # ── 4. 넣기 버튼 (모달 열기) ──
+                        # ── 넣기 버튼 (모달 열기) ──
                         btn_a, btn_b = st.columns(2)
                         with btn_a:
                             if st.button(
@@ -1284,6 +1312,11 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                                     "next_slot": next_slot_1based,
                                 }
                                 st.rerun()
+            else:
+                st.info(
+                    f"🔽 검색 결과가 접혀 있습니다. "
+                    f"위 **🔽 결과 펼치기** 버튼 또는 새로 검색하면 다시 표시됩니다."
+                )
 
 st.markdown("---")
 
@@ -1422,4 +1455,4 @@ if _picker:
         _picker["detail_key"],
         _picker["base_key"],
         _picker["next_slot"],
-                )
+        )
