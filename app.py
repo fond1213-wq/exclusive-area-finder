@@ -874,42 +874,24 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
     return info, None, all_debug
 
 
+# ============================================================
+# ★ 5-4. 주택유형 판별 (전면 재작성)
+# ------------------------------------------------------------
+#  - 건축물대장 주용도 코드/명칭을 최우선으로 사용
+#  - '다세대주택(5층↑·소규모)', '아파트(추정)' 같은 모순·추정 라벨 제거
+#  - 정보가 부족하면 '공동주택'으로 정직하게 표기
+# ============================================================
 def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
                            hhld="", grnd_flr="", plat_area="", arch_area="",
                            ho_cnt="", tot_area=""):
-    def _to_int(v):
-        try:
-            return int(float(str(v).replace(",", "").strip()))
-        except (ValueError, TypeError, AttributeError):
-            return None
-
-    def _to_float(v):
-        try:
-            return float(str(v).replace(",", "").strip())
-        except (ValueError, TypeError, AttributeError):
-            return None
-
     cd_raw = str(purps_cd or "").strip()
-    try:
-        cd = cd_raw.zfill(5) if cd_raw.isdigit() else cd_raw
-    except (ValueError, AttributeError):
-        cd = cd_raw
-
+    cd = cd_raw.zfill(5) if cd_raw.isdigit() else cd_raw
     nm = str(purps_nm or "").strip()
     e = str(etc_purps or "").strip()
     bn = str(bld_nm or "").strip()
     combined = f"{nm} {e}"
 
-    hhld_n = _to_int(hhld)
-    ho_n = _to_int(ho_cnt)
-    flr_n = _to_int(grnd_flr)
-    plat_n = _to_float(plat_area)
-    arch_n = _to_float(arch_area)
-    tot_n = _to_float(tot_area)
-
-    has_villa_kw = any(k in bn for k in VILLA_LIKE_KEYWORDS)
-    has_apt_kw = any(k in bn for k in APARTMENT_BRAND_KEYWORDS)
-
+    # ── 1순위: 주용도 코드 ──
     if cd == "02001":
         return "아파트"
     if cd == "02002":
@@ -919,8 +901,6 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     if cd == "01003":
         return "단독(다가구)주택"
     if cd in ("01000", "01001"):
-        if hhld_n is not None and hhld_n >= 2:
-            return "단독(다가구)주택"
         if "다가구" in nm or "다가구" in e:
             return "단독(다가구)주택"
         return "단독주택"
@@ -929,6 +909,7 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
             return "오피스텔(업무시설)"
         return nm or "업무시설"
 
+    # ── 2순위: 주용도 명칭 ──
     if "아파트" in nm:
         return "아파트"
     if "다세대" in nm:
@@ -937,56 +918,41 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
         return "연립주택"
     if "다가구" in nm:
         return "단독(다가구)주택"
-    if "오피스텔" in nm or "오피스텔" in e or "오피스텔" in bn:
+    if "단독" in nm:
+        return "단독주택"
+    if "오피스텔" in nm:
         return "오피스텔(업무시설)"
 
+    # ── 3순위: 공동주택 일반 코드/명칭 (하위 유형 미지정) ──
+    #   층수·세대수로 임의 추정하지 않음.
+    #   건물명에 아파트 브랜드 키워드가 명확히 있을 때만 '아파트'로 승격.
     if cd.startswith("02000") or "공동주택" in nm or "공동주택" in e:
-        if has_villa_kw and not has_apt_kw:
-            if flr_n is not None and flr_n <= 4:
-                area_ref = arch_n if arch_n is not None else plat_n
-                if area_ref is not None:
-                    return "연립주택" if area_ref > 660 else "다세대주택"
-                return "다세대주택"
-            if flr_n is not None and flr_n >= 5:
-                return "다세대주택(5층↑)"
-            return "다세대주택"
-        if has_apt_kw:
+        has_apt_kw = any(k in bn for k in APARTMENT_BRAND_KEYWORDS)
+        has_villa_kw = any(k in bn for k in VILLA_LIKE_KEYWORDS)
+        if has_apt_kw and not has_villa_kw:
             return "아파트"
-        if flr_n is not None:
-            if flr_n >= 5:
-                if hhld_n is not None and hhld_n < 30:
-                    return "다세대주택(5층↑·소규모)"
-                return "아파트"
-            else:
-                area_ref = arch_n if arch_n is not None else plat_n
-                if area_ref is not None:
-                    return "연립주택" if area_ref > 660 else "다세대주택"
-                if hhld_n is not None:
-                    return "다세대주택" if hhld_n <= 4 else "연립주택"
-                return "다세대주택(추정)"
-        if hhld_n is not None:
-            if hhld_n >= 50:
-                return "아파트"
-            if hhld_n >= 5:
-                return "연립주택(추정)"
-            return "다세대주택(추정)"
-        if has_villa_kw:
-            return "다세대주택(추정)"
-        if has_apt_kw or "아파트" in bn:
-            return "아파트(추정)"
-        if "파크" in bn or "포레온" in bn or "센트라스" in bn:
-            return "아파트(추정)"
-        return "공동주택(정보부족)"
+        if has_villa_kw and not has_apt_kw:
+            return "다세대주택" if any(k in bn for k in ("빌라", "빌")) else "연립주택"
+        # 정보 부족: 추정하지 않고 '공동주택'으로 표기
+        return "공동주택"
 
-    if "아파트" in e: return "아파트"
-    if "다세대" in e: return "다세대주택"
-    if "연립" in e: return "연립주택"
-    if "다가구" in e: return "단독(다가구)주택"
-    if "단독" in e: return "단독주택"
-    if "오피스텔" in e: return "오피스텔(업무시설)"
+    # ── 4순위: 기타용도 키워드 ──
+    if "아파트" in e:
+        return "아파트"
+    if "다세대" in e:
+        return "다세대주택"
+    if "연립" in e:
+        return "연립주택"
+    if "다가구" in e:
+        return "단독(다가구)주택"
+    if "단독" in e:
+        return "단독주택"
+    if "오피스텔" in e:
+        return "오피스텔(업무시설)"
 
+    # ── 5순위: 비주거 ──
     if any(k in combined for k in ("근린생활", "상가", "판매", "숙박", "공장", "업무시설")):
-        if has_apt_kw or "아파트" in bn or "센트라스" in bn:
+        if any(k in bn for k in APARTMENT_BRAND_KEYWORDS):
             return "아파트(주상복합 추정)"
         return nm or "비주거용"
 
@@ -1034,24 +1000,23 @@ def process_address(address, progress=None):
         juso["platGbCd"], juso=juso,
         target_dong=target_dong, target_ho=target_ho)
 
-    housing_type = ""
-    housing_type_source = ""
+    # ── 주택유형 판별 ──
+    # 표제부(건축물대장) 주용도를 최우선으로 판별하고,
+    # 표제부가 모호할 때만 인허가 API로 보완한다.
+    type_from_title = ""
+    type_from_permit = ""
 
-    if permit_info and permit_info.get("주택유형코드명"):
-        housing_type = normalize_hstp_type(
-            permit_info["주택유형코드명"],
-            permit_info.get("주택유형코드", "")
+    if type_info:
+        bld_nm_for_classify = (
+            type_info.get("건물명", "")
+            or (permit_info.get("건물명", "") if permit_info else "")
+            or (juso.get("bdNm", "") if juso else "")
         )
-        housing_type_source = "인허가API"
-
-    if housing_type in ("공동주택", "") or any(
-            k in housing_type for k in ("판매", "근린", "상가", "숙박", "공장")) and type_info:
-        housing_type = classify_housing_type(
+        type_from_title = classify_housing_type(
             purps_cd=type_info.get("주용도코드", ""),
             purps_nm=type_info.get("주용도", ""),
             etc_purps=type_info.get("기타용도", ""),
-            bld_nm=type_info.get("건물명", "") or (
-                permit_info.get("건물명", "") if permit_info else ""),
+            bld_nm=bld_nm_for_classify,
             hhld=type_info.get("세대수", ""),
             grnd_flr=type_info.get("지상층수", ""),
             plat_area=type_info.get("대지면적", ""),
@@ -1059,7 +1024,33 @@ def process_address(address, progress=None):
             ho_cnt=type_info.get("호수", ""),
             tot_area=type_info.get("연면적", ""),
         )
+
+    if permit_info and permit_info.get("주택유형코드명"):
+        type_from_permit = normalize_hstp_type(
+            permit_info["주택유형코드명"],
+            permit_info.get("주택유형코드", ""),
+        )
+
+    _weak_types = ("", "미분류", "정보부족", "비주거용", "공동주택")
+
+    housing_type = ""
+    housing_type_source = ""
+
+    if type_from_title and type_from_title not in _weak_types:
+        housing_type = type_from_title
         housing_type_source = "표제부기반"
+        if (type_from_permit and type_from_permit not in _weak_types
+                and type_from_permit != type_from_title):
+            housing_type_source = f"표제부기반(인허가:{type_from_permit})"
+    elif type_from_permit and type_from_permit not in _weak_types:
+        housing_type = type_from_permit
+        housing_type_source = "인허가API(표제부 모호)"
+    elif type_from_title:
+        housing_type = type_from_title
+        housing_type_source = "표제부기반"
+    elif type_from_permit:
+        housing_type = type_from_permit
+        housing_type_source = "인허가API"
 
     is_single_house = housing_type in ("단독주택", "단독(다가구)주택")
     if is_single_house and type_info:
@@ -1085,6 +1076,8 @@ def process_address(address, progress=None):
             "permit_info": permit_info,
             "type_debug": type_dbg,
             "type_info": type_info,
+            "type_from_title": type_from_title,
+            "type_from_permit": type_from_permit,
             "housing_type_source": housing_type_source,
         }
         return {
@@ -1108,6 +1101,8 @@ def process_address(address, progress=None):
         "api_debug": api_debug,
         "type_debug": type_dbg,
         "type_info": type_info,
+        "type_from_title": type_from_title,
+        "type_from_permit": type_from_permit,
         "errors": errors,
         "type_err": type_err,
         "permit_err": permit_err,
@@ -1301,7 +1296,7 @@ if _flash:
 
 st.subheader("📋 전용면적 · 주택유형 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
-           "주택유형은 **건축인허가정보 API(1순위) + 건축물대장 표제부(동 매칭) + 총괄표제부(보완)** 를 조합해 판별합니다. "
+           "주택유형은 **건축물대장 표제부 주용도(1순위) → 인허가정보 API(보완)** 순으로 판별합니다. "
            "단독주택은 표제부 **연면적과 대지면적**을 함께 반환합니다.")
 
 # ============================================================
@@ -1534,4 +1529,4 @@ if _picker:
         _picker["detail_key"],
         _picker["base_key"],
         _picker["next_slot"],
-        )
+                            )
