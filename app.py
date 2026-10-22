@@ -423,8 +423,7 @@ def _bjdong_variants(bjdongCd, alt=None):
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     """
-    ★ 반환: (area, status, errors, debug, matched_unit)
-       matched_unit: 매칭된 전유부 item(dict) 또는 None
+    반환: (area, status, errors, debug, matched_unit)
     """
     if not target_ho:
         return None, "호수를 인식하지 못했습니다.", [], [], None
@@ -718,6 +717,9 @@ def normalize_hstp_type(code_nm, code=""):
     nm = str(code_nm or "").strip()
     cd = str(code or "").strip()
 
+    # ★ 도시형생활주택 (다세대보다 먼저 체크)
+    if "도시형생활주택" in nm or "도시형 생활주택" in nm:
+        return "도시형생활주택"
     if "아파트" in nm:
         return "아파트"
     if "다세대" in nm:
@@ -746,7 +748,7 @@ def normalize_hstp_type(code_nm, code=""):
 
 
 # ============================================================
-# ★ 5-3. 표제부 조회 (주용도 구체성 기반 선택)
+# ★ 5-3. 표제부 조회
 # ============================================================
 def _pick_best_title(all_items, target_dong, target_ho):
     if not all_items:
@@ -772,7 +774,7 @@ def _pick_best_title(all_items, target_dong, target_ho):
     def _is_residential(item):
         nm = str(item.get("mainPurpsCdNm", "") or "")
         cd = str(item.get("mainPurpsCd", "") or "").strip().zfill(5)
-        if any(k in nm for k in ("주택", "아파트", "공동주택", "단독", "다세대", "연립", "다가구", "오피스텔")):
+        if any(k in nm for k in ("주택", "아파트", "공동주택", "단독", "다세대", "연립", "다가구", "오피스텔", "도시형")):
             return True
         if cd.startswith("01") or cd.startswith("02") or cd == "14000":
             return True
@@ -901,6 +903,16 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     e = str(etc_purps or "").strip()
     bn = str(bld_nm or "").strip()
     combined = f"{nm} {e}"
+
+    # ── 0순위: 도시형생활주택 (다세대 키워드보다 먼저!) ──
+    #   '도시형생활주택(단지형 다세대주택)' 처럼 다세대가 포함돼도
+    #   도시형생활주택으로 먼저 잡아야 함.
+    if "도시형생활주택" in nm or "도시형 생활주택" in nm:
+        return "도시형생활주택"
+    if "도시형생활주택" in e or "도시형 생활주택" in e:
+        return "도시형생활주택"
+    if "도시형생활주택" in bn or "도시형 생활주택" in bn:
+        return "도시형생활주택"
 
     # 1순위: 주용도 코드
     if cd == "02001":
@@ -1115,6 +1127,14 @@ def process_address(address, progress=None):
                 tot_area=type_info.get("연면적", "") if type_info else "",
             )
 
+    # ★★★ 예외 규칙 ★★★
+    # 전유부 API가 mainPurpsCdNm을 '다세대주택'으로 잘못(또는 부정확하게)
+    # 반환하는 경우, 표제부·인허가에서 '도시형생활주택'으로 확인되면
+    # 전유부 값을 무시하고 도시형생활주택을 채택한다.
+    if type_from_unit == "다세대주택":
+        if type_from_title == "도시형생활주택" or type_from_permit == "도시형생활주택":
+            type_from_unit = ""
+
     # ── 최종 판정: 가장 구체적인 소스 채택 (전유부 > 표제부 > 인허가) ──
     type_candidates = [
         (type_from_unit, "전유부기반"),
@@ -1151,6 +1171,9 @@ def process_address(address, progress=None):
         "type_from_permit": type_from_permit,
         "matched_unit_주용도": (
             matched_unit.get("mainPurpsCdNm") if matched_unit else ""
+        ),
+        "matched_unit_주용도코드": (
+            matched_unit.get("mainPurpsCd") if matched_unit else ""
         ),
         "errors": errors,
         "type_err": type_err,
@@ -1207,7 +1230,7 @@ def process_address(address, progress=None):
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 도로명주소 검색 (커스텀 접기/펼치기 + 카드별 접기 버튼)
+# ★ 도로명주소 검색
 # ============================================================
 with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명(예: 과천푸르지오써밋) 또는 주소 일부(예: 관문로 106)를 입력하세요.")
@@ -1346,10 +1369,11 @@ if _flash:
 st.subheader("📋 전용면적 · 주택유형 조회")
 st.caption("💡 **'OO동 OOOO호'** 형식 권장. "
            "주택유형은 **전유부(매칭된 호) 주용도(1순위) → 표제부 → 인허가정보 API** 순으로 가장 구체적인 값을 채택합니다. "
+           "**도시형생활주택**은 다세대주택보다 상위 개념으로 우선 판별합니다. "
            "단독주택은 표제부 **연면적과 대지면적**을 함께 반환합니다.")
 
 # ============================================================
-# ★ 주소 입력칸 (동적 1 ~ 10개)
+# ★ 주소 입력칸
 # ============================================================
 addresses = []
 for i in range(st.session_state.address_count):
@@ -1397,7 +1421,6 @@ st.caption(
     f"({'최대치 도달' if st.session_state.address_count >= MAX_ADDRESS else '➕ 버튼으로 추가 가능'})"
 )
 
-# ★ 조회 버튼 바로 아래 로딩/요약 표시 자리
 loading_slot = st.empty()
 summary_slot = st.empty()
 
