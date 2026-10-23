@@ -35,9 +35,6 @@ JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
 DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=False)
 
-# ============================================================
-# ★ 사용자 고유 ID (URL 쿼리 파라미터 기반, 본인 조회만 표시)
-# ============================================================
 if "uid" not in st.query_params:
     st.query_params["uid"] = uuid.uuid4().hex[:12]
 USER_ID = st.query_params["uid"]
@@ -60,7 +57,7 @@ APARTMENT_BRAND_KEYWORDS = (
 VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
 
 # ============================================================
-# ★ 슬롯 유틸
+# 슬롯 유틸
 # ============================================================
 def get_next_empty_slot():
     for i in range(MAX_ADDRESS):
@@ -117,7 +114,7 @@ def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
             st.rerun()
 
 # ============================================================
-# 2. 파싱 유틸
+# 파싱 유틸
 # ============================================================
 def clean_address_for_parsing(address):
     text = str(address).strip()
@@ -214,7 +211,7 @@ def parse_rel_jibun(rel_jibun_str):
     return results
 
 # ============================================================
-# 3. Juso API
+# Juso API
 # ============================================================
 def search_juso_single(keyword):
     params = {"confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": 10,
@@ -231,7 +228,6 @@ def search_juso_single(keyword):
         if common.get("errorCode", "") not in ("", "0"):
             return [], f"오류 [{common.get('errorCode')}]", dbg
         juso_list = data.get("results", {}).get("juso", [])
-        dbg["juso_count"] = len(juso_list)
         return juso_list, "정상", dbg
     except requests.exceptions.RequestException as e:
         return [], f"요청 실패: {e}", dbg
@@ -308,7 +304,7 @@ def search_address_candidates(keyword, count=20):
     return results, None
 
 # ============================================================
-# 4. 국토부 API 호출
+# 국토부 API 호출
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
@@ -376,7 +372,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 매칭 엔진
+# 매칭 엔진
 # ============================================================
 def _bjdong_variants(bjdongCd, alt=None):
     variants = []
@@ -624,7 +620,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# 5-1. 총괄표제부
+# 총괄표제부
 # ============================================================
 def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
@@ -651,7 +647,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
 
 
 # ============================================================
-# 5-2. 인허가정보 API
+# 인허가정보 API
 # ============================================================
 def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
@@ -713,7 +709,7 @@ def normalize_hstp_type(code_nm, code=""):
 
 
 # ============================================================
-# 5-3. 표제부 조회
+# 표제부 조회
 # ============================================================
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
                         target_dong="", target_ho=""):
@@ -822,7 +818,7 @@ def _housing_specificity(t):
 
 
 # ============================================================
-# 6. 프로세스
+# 프로세스
 # ============================================================
 def process_address(address, progress=None):
     if not address:
@@ -975,7 +971,7 @@ def process_address(address, progress=None):
 
 
 # ============================================================
-# 6-1. 백그라운드 조회 (탭 닫아도 실행, 사용자별 격리)
+# 백그라운드 조회
 # ============================================================
 def _background_query(query_id, addresses, user_id):
     status_path = os.path.join(QUERY_DIR, f"{user_id}_{query_id}_status.json")
@@ -1009,7 +1005,7 @@ def _background_query(query_id, addresses, user_id):
 
 
 # ============================================================
-# 6-2. 결과 렌더링
+# 결과 렌더링
 # ============================================================
 def render_results(results):
     success = sum(1 for r in results
@@ -1060,7 +1056,7 @@ def render_results(results):
 
 
 # ============================================================
-# 6-3. 상태 폴링
+# 상태 폴링
 # ============================================================
 @st.fragment(run_every=1.5)
 def render_query_status():
@@ -1119,18 +1115,19 @@ def render_query_status():
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 최근 조회 결과 (본인 것만, 기본 접힘, 눈에 안 띄는 토글)
+# ★ 최근 조회 결과 (모든 결과 노출 / 기본 접힘 / 눈에 안 띄는 토글)
 # ============================================================
 if "show_recent" not in st.session_state:
     st.session_state.show_recent = False
 
+# ★ 모든 사용자/세션의 결과 파일 (필터 없음)
 recent_files = sorted(
-    glob.glob(os.path.join(QUERY_DIR, f"{USER_ID}_*_results.json")),
+    glob.glob(os.path.join(QUERY_DIR, "*_results.json")),
     key=os.path.getmtime, reverse=True
 )[:5]
 
 if recent_files:
-    # 눈에 안 띄는 조용한 토글 - 커스텀 CSS
+    # 눈에 안 띄는 조용한 토글 (커스텀 CSS)
     st.markdown(
         """
         <style>
@@ -1138,13 +1135,13 @@ if recent_files:
             background: transparent !important;
             border: none !important;
             color: #b8b8b8 !important;
-            font-size: 0.76rem !important;
+            font-size: 0.78rem !important;
             font-weight: 400 !important;
             padding: 0 !important;
-            margin: 0 0 4px 0 !important;
+            margin: 0 !important;
             min-height: 0 !important;
             height: auto !important;
-            line-height: 1.2 !important;
+            line-height: 1.3 !important;
             text-align: left !important;
             box-shadow: none !important;
             justify-content: flex-start !important;
@@ -1165,33 +1162,34 @@ if recent_files:
         unsafe_allow_html=True,
     )
 
-    with st.container():
-        st.markdown('<div class="recent-toggle">', unsafe_allow_html=True)
-        arrow = "▾" if st.session_state.show_recent else "▸"
-        if st.button(
-            f"{arrow} 최근 조회 결과 {len(recent_files)}건",
-            key="toggle_recent_btn",
-        ):
-            st.session_state.show_recent = not st.session_state.show_recent
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="recent-toggle">', unsafe_allow_html=True)
+    arrow = "▾" if st.session_state.show_recent else "▸"
+    if st.button(
+        f"{arrow} 최근 조회 결과 {len(recent_files)}건",
+        key="toggle_recent_btn",
+    ):
+        st.session_state.show_recent = not st.session_state.show_recent
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
+    # ★ 접혀있을 때는 아무것도 안 보임. 펼쳤을 때만 결과 리스트
     if st.session_state.show_recent:
         with st.container(border=True):
-            st.caption("📌 본인이 조회한 결과만 표시됩니다. (탭을 닫아도 여기 남아있음)")
+            st.caption("📌 최근 조회 결과입니다. (탭을 닫아도 여기 남아있음)")
             for rf in recent_files:
                 try:
                     mtime = datetime.fromtimestamp(os.path.getmtime(rf)).strftime("%m-%d %H:%M")
                     with open(rf, encoding="utf-8") as fh:
                         data = json.load(fh)
-                    qid_file = os.path.basename(rf).replace(f"{USER_ID}_", "").replace("_results.json", "")
+                    # ★ 파일명에서 "_results.json" 만 제거 (USER_ID prefix 유지)
+                    file_key = os.path.basename(rf).replace("_results.json", "")
                     c1, c2 = st.columns([5, 1])
                     with c1:
                         st.caption(f"[{mtime}] {len(data)}건")
                     with c2:
-                        if st.button("불러오기", key=f"load_{qid_file}", use_container_width=True):
-                            st.session_state["_current_query_id"] = qid_file
-                            st.session_state[f"_results_cache_{qid_file}"] = data
+                        if st.button("불러오기", key=f"load_{file_key}", use_container_width=True):
+                            st.session_state["_current_query_id"] = file_key
+                            st.session_state[f"_results_cache_{file_key}"] = data
                             st.rerun()
                 except (json.JSONDecodeError, IOError):
                     pass
