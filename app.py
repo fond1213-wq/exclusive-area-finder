@@ -44,7 +44,7 @@ APARTMENT_BRAND_KEYWORDS = (
 VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
 
 # ============================================================
-# ★ 슬롯 유틸
+# 슬롯 유틸
 # ============================================================
 def get_next_empty_slot():
     for i in range(MAX_ADDRESS):
@@ -61,9 +61,7 @@ def fill_slot(slot_idx_0based, value):
 
 def slot_label(slot_1based, next_slot_1based):
     is_next = (slot_1based == next_slot_1based)
-    has_val = bool(
-        str(st.session_state.get(f"address_{slot_1based - 1}", "") or "").strip()
-    )
+    has_val = bool(str(st.session_state.get(f"address_{slot_1based - 1}", "") or "").strip())
     if is_next and has_val:
         return f"⭐ 주소 {slot_1based} (다음 빈슬롯 · 덮어쓰기)", True
     if is_next:
@@ -80,7 +78,7 @@ def combine_address(base, detail):
     return f"{b} {d}"
 
 # ============================================================
-# ★ 슬롯 선택 모달 다이얼로그
+# 슬롯 선택 모달
 # ============================================================
 @st.dialog("📥 주소 넣을 위치 선택")
 def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
@@ -93,8 +91,7 @@ def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
     for slot_1b in range(1, MAX_ADDRESS + 1):
         label, is_next = slot_label(slot_1b, next_slot_1based)
         if st.button(
-            label,
-            key=f"dlg_{base_key}_{slot_1b}",
+            label, key=f"dlg_{base_key}_{slot_1b}",
             use_container_width=True,
             type="primary" if is_next else "secondary",
         ):
@@ -103,13 +100,11 @@ def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
                 st.session_state.get(detail_key, ""),
             )
             fill_slot(slot_1b - 1, final_value)
-            st.session_state["_flash_msg"] = (
-                f"✅ 주소 {slot_1b}에 입력 완료: {final_value}"
-            )
+            st.session_state["_flash_msg"] = f"✅ 주소 {slot_1b}에 입력 완료: {final_value}"
             st.rerun()
 
 # ============================================================
-# 2. 파싱 유틸
+# 파싱 유틸
 # ============================================================
 def clean_address_for_parsing(address):
     text = str(address).strip()
@@ -206,7 +201,95 @@ def parse_rel_jibun(rel_jibun_str):
     return results
 
 # ============================================================
-# 3. Juso API
+# ★★★ 신규: 호수 매칭 (층/특수문자 지원) ★★★
+# ============================================================
+def _ho_matches(target_ho, ho_text):
+    """전유부 호수 매칭 - 다양한 표기 지원:
+       "1302" ↔ "1302", "1302호", "13층1302", "13층 1302호",
+                "1302(13층)", "13F/1302", "1302-13"
+    """
+    target = str(target_ho).strip()
+    h = str(ho_text or "").strip()
+    if not target or not h:
+        return False
+
+    # 1) 정확 일치
+    if is_match(target, h):
+        return True
+
+    # 2) "호" 앞 숫자
+    for m in re.finditer(r"(\d+)\s*호", h):
+        if m.group(1) == target:
+            return True
+
+    # 3) 층 표기 제거 후 남은 숫자에서 target 찾기
+    h_cleaned = h
+    for _ in range(3):
+        h_cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", h_cleaned)
+        h_cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", h_cleaned)
+    if re.search(rf"(?<!\d){re.escape(target)}(?!\d)", h_cleaned):
+        return True
+
+    # 4) 마지막 숫자
+    all_nums = re.findall(r"\d+", h)
+    if all_nums and all_nums[-1] == target:
+        return True
+
+    # 5) 구분자 토큰
+    tokens = re.split(r"[\s\-_/]+", h)
+    for t in tokens:
+        if t == target:
+            return True
+
+    return False
+
+
+# ============================================================
+# ★★★ 신규: 전유/공용 판별 (오래된 대장 호환) ★★★
+# ============================================================
+def _is_exclusive(item):
+    cd = str(item.get("exposPubuseGbCd", "")).strip()
+    nm = str(item.get("exposPubuseGbCdNm", "")).strip()
+
+    if cd in ("1", "01", "001"):
+        return True
+    if cd in ("2", "02", "002"):
+        return False
+
+    if nm:
+        if "공용" in nm:
+            return False
+        if "전유" in nm:
+            return True
+
+    # 판단 불가 → hoNm이 숫자(주거용)면 전유로 간주
+    h = str(item.get("hoNm", "")).strip()
+    if h and re.search(r"\d{2,}", h) and not re.search(
+            r"주차|기계|계단|홀|화장실|창고|관리|경비|지하|옥탑|부속", h):
+        return True
+
+    return False
+
+
+# ============================================================
+# ★★★ 신규: 동 매칭 (dongNm에 층이 들어간 경우) ★★★
+# ============================================================
+def _dong_matches(target_dong, item_dong):
+    t = str(target_dong or "").strip()
+    d = str(item_dong or "").strip()
+
+    if not t or not d:
+        return True
+    if is_match(t, d):
+        return True
+    # d가 층 표기("13층")면 → 동 정보 없음으로 간주
+    if re.match(r"^\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)$", d):
+        return True
+    return False
+
+
+# ============================================================
+# Juso API
 # ============================================================
 def search_juso_single(keyword):
     params = {"confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": 10,
@@ -280,9 +363,6 @@ def search_juso(address):
                 return d, "정상", all_dbg
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
-# ============================================================
-# 3-1. 도로명주소 검색
-# ============================================================
 def search_address_candidates(keyword, count=20):
     params = {
         "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": str(count),
@@ -314,7 +394,7 @@ def search_address_candidates(keyword, count=20):
     return results, None
 
 # ============================================================
-# 4. 국토부 API 호출
+# 국토부 API 호출
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
@@ -401,7 +481,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 5. 매칭 엔진
+# 매칭 엔진
 # ============================================================
 def _bjdong_variants(bjdongCd, alt=None):
     variants = []
@@ -420,50 +500,6 @@ def _bjdong_variants(bjdongCd, alt=None):
     return variants
 
 
-# ============================================================
-# ★★ 신규: 전유부 호수 매칭 (층 정보 붙은 형식 지원)
-# ============================================================
-def _ho_matches(target_ho, ho_text):
-    """
-    전유부 호수 매칭 - 다양한 표기 형식 지원:
-      - "1302" ↔ "1302", "1302호"
-      - "1302" ↔ "13층1302", "13층 1302호", "1302(13층)", "1302호(13층)"
-      - "1302" ↔ "13F1302", "13층-1302", "1302-13"
-    오탐 방지: "13" 이 "13층1302" 의 "13" 에 매칭되지 않도록 처리
-    """
-    target = str(target_ho).strip()
-    h = str(ho_text or "").strip()
-
-    if not target or not h:
-        return False
-
-    # 1) 정확 일치 (동/호/제/공백 무시)
-    if is_match(target, h):
-        return True
-
-    # 2) "호" 앞 숫자가 target 과 일치
-    for m in re.finditer(r"(\d+)\s*호", h):
-        if m.group(1) == target:
-            return True
-
-    # 3) "층" / "F" 로 표기된 층 번호를 제거한 뒤 target 포함 여부
-    #    "13층1302" → " 1302"
-    #    "1302(13층)" → "1302( )"
-    h_cleaned = h
-    for _ in range(3):  # 중첩/연속 층 표기 대응
-        h_cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr)", " ", h_cleaned)
-        h_cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", h_cleaned)
-    if re.search(rf"(?<!\d){re.escape(target)}(?!\d)", h_cleaned):
-        return True
-
-    # 4) 마지막 숫자가 target 과 일치 (기존 방식 유지)
-    all_nums = re.findall(r"\d+", h)
-    if all_nums and all_nums[-1] == target:
-        return True
-
-    return False
-
-
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
@@ -472,18 +508,20 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     expected_bldNm = expected_bldNm or []
     all_errors, all_debug = [], []
 
-    def _is_exclusive(item):
-        return str(item.get("exposPubuseGbCd", "")).strip() == "1" or \
-               ("전유" in str(item.get("exposPubuseGbCdNm", "")) and
-                "공용" not in str(item.get("exposPubuseGbCdNm", "")))
-
     def _safe_area(item):
-        try:
-            v = float(str(item.get("area", "0")).replace(",", ""))
-            if 5.0 <= v <= 500.0:
-                return round(v, 2)
-        except (ValueError, TypeError):
-            pass
+        for field in ("area", "exposArea", "전유면적"):
+            raw = item.get(field)
+            if raw is None or raw == "":
+                continue
+            try:
+                cleaned = re.sub(r"[^\d.]", "", str(raw).replace(",", ""))
+                if not cleaned:
+                    continue
+                v = float(cleaned)
+                if 5.0 <= v <= 500.0:
+                    return round(v, 2)
+            except (ValueError, TypeError):
+                continue
         return None
 
     def _ho_num(s):
@@ -510,15 +548,29 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if not _bldnm_ok(item):
             return False
         h = (item.get("hoNm") or "").strip()
-        # ★ 개선: _ho_matches 로 다양한 형식 지원
         if not _ho_matches(target_ho, h):
             return False
         if target_dong:
             d = (item.get("dongNm") or "").strip()
-            if not d:
-                return True
-            return is_match(target_dong, d)
+            if not _dong_matches(target_dong, d):
+                return False
         return True
+
+    def _matches_relaxed(item):
+        """완화: is_exclusive 무시, dongNm 층이면 통과"""
+        h = (item.get("hoNm") or "").strip()
+        if not _ho_matches(target_ho, h):
+            return False
+        if target_dong:
+            d = (item.get("dongNm") or "").strip()
+            if not _dong_matches(target_dong, d):
+                return False
+        return True
+
+    def _matches_final(item):
+        """최종: hoNm만"""
+        h = (item.get("hoNm") or "").strip()
+        return _ho_matches(target_ho, h)
 
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
 
@@ -572,6 +624,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     filter_attempts.append({"hoNm": str(target_ho)})
     filter_attempts.append({"hoNm": f"{target_ho}호"})
 
+    # -------- 1단계: 필터 매칭 (엄격) --------
     for pg, bd, b, j in combos[:8]:
         for extra in filter_attempts:
             area_list, err1, dbg1 = call_api_all_pages(
@@ -586,6 +639,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                     if val is not None:
                         return val, "조회 성공 (필터)", all_errors, all_debug
 
+    # -------- 2단계: 전체조회 + 3단 폴백 --------
     survey_items = []
     any_data_found = False
     for pg, bd, b, j in combos:
@@ -605,6 +659,21 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                     return val, "조회 성공 (전체조회)", all_errors, all_debug
             break
 
+    # 완화 폴백 1: is_exclusive 무시
+    if survey_items:
+        for a in survey_items:
+            if _matches_relaxed(a):
+                val = _safe_area(a)
+                if val is not None:
+                    return val, "조회 성공 (완화매칭)", all_errors, all_debug
+
+        # 완화 폴백 2: hoNm만 매칭
+        for a in survey_items:
+            if _matches_final(a):
+                val = _safe_area(a)
+                if val is not None:
+                    return val, "조회 성공 (호수만 매칭)", all_errors, all_debug
+
     if not any_data_found:
         tried = [f"{pg}/{bd}/{b}-{j}" for pg, bd, b, j in combos[:8]]
         return None, (f"전유부·표제부 모두 데이터 없음. "
@@ -617,7 +686,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         if (i.get("dongNm") or "").strip()})
     all_hos = sorted({(i.get("hoNm") or "").strip() for i in survey_items
                       if (i.get("hoNm") or "").strip()})
-    # ★ 개선: _ho_matches 로 유사 호수 표시
     similar_hos = [h for h in all_hos if _ho_matches(target_ho, h)]
 
     hint_parts = []
@@ -651,7 +719,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
 
 # ============================================================
-# ★ 5-1. 총괄표제부 조회
+# 총괄표제부 조회
 # ============================================================
 def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
@@ -682,7 +750,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
 
 
 # ============================================================
-# ★ 5-2. 건축인허가정보 API
+# 건축인허가정보 API
 # ============================================================
 def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
@@ -694,14 +762,9 @@ def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
         for pg in plat_candidates:
             params = {
                 "serviceKey": PERMIT_API_KEY_DECODED,
-                "sigunguCd": sigunguCd,
-                "bjdongCd": bd,
-                "platGbCd": pg,
-                "bun": str(bun).zfill(4),
-                "ji": str(ji).zfill(4),
-                "numOfRows": "100",
-                "pageNo": "1",
-                "_type": "json",
+                "sigunguCd": sigunguCd, "bjdongCd": bd, "platGbCd": pg,
+                "bun": str(bun).zfill(4), "ji": str(ji).zfill(4),
+                "numOfRows": "100", "pageNo": "1", "_type": "json",
             }
             try:
                 res = requests.get(url, params=params, timeout=15)
@@ -727,9 +790,7 @@ def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
                 if not item_list:
                     continue
 
-                item_list.sort(
-                    key=lambda x: str(x.get("crtnDay", "")), reverse=True
-                )
+                item_list.sort(key=lambda x: str(x.get("crtnDay", "")), reverse=True)
                 item = item_list[0]
 
                 info = {
@@ -759,35 +820,24 @@ def normalize_hstp_type(code_nm, code=""):
     nm = str(code_nm or "").strip()
     cd = str(code or "").strip()
 
-    if "아파트" in nm:
-        return "아파트"
-    if "다세대" in nm:
-        return "다세대주택"
-    if "연립" in nm:
-        return "연립주택"
-    if "단독" in nm and "다가구" in nm:
-        return "단독(다가구)주택"
-    if "단독" in nm:
-        return "단독주택"
-    if "다가구" in nm:
-        return "단독(다가구)주택"
-    if "오피스텔" in nm:
-        return "오피스텔(업무시설)"
-    if "공동주택" in nm:
-        return "공동주택"
+    if "아파트" in nm: return "아파트"
+    if "다세대" in nm: return "다세대주택"
+    if "연립" in nm: return "연립주택"
+    if "단독" in nm and "다가구" in nm: return "단독(다가구)주택"
+    if "단독" in nm: return "단독주택"
+    if "다가구" in nm: return "단독(다가구)주택"
+    if "오피스텔" in nm: return "오피스텔(업무시설)"
+    if "공동주택" in nm: return "공동주택"
 
-    if cd == "1":
-        return "단독주택"
-    if cd == "2":
-        return "오피스텔(업무시설)"
-    if cd == "3":
-        return "공동주택"
+    if cd == "1": return "단독주택"
+    if cd == "2": return "오피스텔(업무시설)"
+    if cd == "3": return "공동주택"
 
     return nm or ""
 
 
 # ============================================================
-# ★ 5-3. 표제부 조회
+# 표제부 조회
 # ============================================================
 def _pick_best_title(all_items, target_dong, target_ho):
     if not all_items:
@@ -879,30 +929,21 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
     }
 
     all_debug.append({
-        "endpoint": "getBrTitleInfo",
-        "note": "candidates_summary",
+        "endpoint": "getBrTitleInfo", "note": "candidates_summary",
         "candidates": [
-            {
-                "dongNm": it.get("dongNm", ""),
-                "bldNm": it.get("bldNm", ""),
-                "mainPurpsCd": it.get("mainPurpsCd", ""),
-                "mainPurpsCdNm": it.get("mainPurpsCdNm", ""),
-                "useAprDay": it.get("useAprDay", ""),
-            }
+            {"dongNm": it.get("dongNm", ""), "bldNm": it.get("bldNm", ""),
+             "mainPurpsCd": it.get("mainPurpsCd", ""),
+             "mainPurpsCdNm": it.get("mainPurpsCdNm", ""),
+             "useAprDay": it.get("useAprDay", "")}
             for it in all_items_collected[:20]
         ],
-        "chosen": {
-            "dongNm": info["동명칭"],
-            "bldNm": info["건물명"],
-            "주용도": info["주용도"],
-            "주용도코드": info["주용도코드"],
-            "대지면적": info["대지면적"],
-        },
+        "chosen": {"dongNm": info["동명칭"], "bldNm": info["건물명"],
+                   "주용도": info["주용도"], "주용도코드": info["주용도코드"],
+                   "대지면적": info["대지면적"]},
     })
 
     need_fallback = (
-        not info["지상층수"] or
-        not info["세대수"] or
+        not info["지상층수"] or not info["세대수"] or
         not info["대지면적"] or
         str(info["대지면적"]).strip() in ("0", "0.0", "0.00")
     )
@@ -955,14 +996,10 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
     has_villa_kw = any(k in bn for k in VILLA_LIKE_KEYWORDS)
     has_apt_kw = any(k in bn for k in APARTMENT_BRAND_KEYWORDS)
 
-    if cd == "02001":
-        return "아파트"
-    if cd == "02002":
-        return "연립주택"
-    if cd == "02003":
-        return "다세대주택"
-    if cd == "01003":
-        return "단독(다가구)주택"
+    if cd == "02001": return "아파트"
+    if cd == "02002": return "연립주택"
+    if cd == "02003": return "다세대주택"
+    if cd == "01003": return "단독(다가구)주택"
     if cd in ("01000", "01001"):
         if hhld_n is not None and hhld_n >= 2:
             return "단독(다가구)주택"
@@ -974,14 +1011,10 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
             return "오피스텔(업무시설)"
         return nm or "업무시설"
 
-    if "아파트" in nm:
-        return "아파트"
-    if "다세대" in nm:
-        return "다세대주택"
-    if "연립" in nm:
-        return "연립주택"
-    if "다가구" in nm:
-        return "단독(다가구)주택"
+    if "아파트" in nm: return "아파트"
+    if "다세대" in nm: return "다세대주택"
+    if "연립" in nm: return "연립주택"
+    if "다가구" in nm: return "단독(다가구)주택"
     if "오피스텔" in nm or "오피스텔" in e or "오피스텔" in bn:
         return "오피스텔(업무시설)"
 
@@ -1039,7 +1072,7 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
 
 
 # ============================================================
-# 6. 프로세스 실행
+# 프로세스 실행
 # ============================================================
 def process_address(address, progress=None):
     if not address:
@@ -1314,8 +1347,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                         with btn_a:
                             if st.button("📥 원본 주소 넣기", key=f"orig_btn_{i}", use_container_width=True):
                                 st.session_state["_picker_open"] = {
-                                    "candidate": c,
-                                    "detail_key": detail_key,
+                                    "candidate": c, "detail_key": detail_key,
                                     "base_key": "도로명주소",
                                     "next_slot": next_slot_1based,
                                 }
@@ -1323,8 +1355,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
                         with btn_b:
                             if st.button("📥 괄호 제거 주소 넣기", key=f"clean_btn_{i}", use_container_width=True):
                                 st.session_state["_picker_open"] = {
-                                    "candidate": c,
-                                    "detail_key": detail_key,
+                                    "candidate": c, "detail_key": detail_key,
                                     "base_key": "도로명주소_깔끔",
                                     "next_slot": next_slot_1based,
                                 }
@@ -1362,8 +1393,7 @@ with ctrl_col1:
     if st.button(
         "➕ 주소 추가",
         disabled=(st.session_state.address_count >= MAX_ADDRESS),
-        use_container_width=True,
-        key="btn_add_addr",
+        use_container_width=True, key="btn_add_addr",
     ):
         st.session_state.address_count += 1
         st.rerun()
@@ -1372,8 +1402,7 @@ with ctrl_col2:
     if st.button(
         "➖ 마지막 삭제",
         disabled=(st.session_state.address_count <= 1),
-        use_container_width=True,
-        key="btn_remove_addr",
+        use_container_width=True, key="btn_remove_addr",
     ):
         remove_idx = st.session_state.address_count - 1
         st.session_state.pop(f"address_{remove_idx}", None)
@@ -1382,10 +1411,8 @@ with ctrl_col2:
 
 with ctrl_col3:
     do_query = st.button(
-        "🔎 조회",
-        type="primary",
-        use_container_width=True,
-        key="btn_query_top",
+        "🔎 조회", type="primary",
+        use_container_width=True, key="btn_query_top",
     )
 
 st.caption(
@@ -1424,26 +1451,17 @@ if do_query:
               }}
               .loading-box {{
                 background: linear-gradient(90deg, #ff9a00, #ff6a00);
-                color: #ffffff;
-                padding: 14px 20px;
-                border-radius: 10px;
-                font-weight: bold;
-                font-size: 1.15rem;
+                color: #ffffff; padding: 14px 20px; border-radius: 10px;
+                font-weight: bold; font-size: 1.15rem;
                 animation: blinkPulse 1.2s ease-in-out infinite;
               }}
               .loading-addr {{
-                display: block;
-                margin-top: 6px;
-                font-weight: normal;
-                font-size: 0.92rem;
-                opacity: 0.95;
+                display: block; margin-top: 6px;
+                font-weight: normal; font-size: 0.92rem; opacity: 0.95;
               }}
               .loading-progress {{
-                display: inline-block;
-                background: rgba(255,255,255,0.25);
-                padding: 2px 10px;
-                border-radius: 12px;
-                margin-left: 8px;
+                display: inline-block; background: rgba(255,255,255,0.25);
+                padding: 2px 10px; border-radius: 12px; margin-left: 8px;
                 font-size: 0.95rem;
               }}
             </style>
@@ -1562,7 +1580,7 @@ if do_query:
     )
 
 # ============================================================
-# ★ 슬롯 선택 모달 트리거
+# 슬롯 선택 모달 트리거
 # ============================================================
 _picker = st.session_state.pop("_picker_open", None)
 if _picker:
@@ -1571,4 +1589,4 @@ if _picker:
         _picker["detail_key"],
         _picker["base_key"],
         _picker["next_slot"],
-                            )
+    )
