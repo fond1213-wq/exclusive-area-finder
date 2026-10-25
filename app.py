@@ -27,8 +27,10 @@ if _missing:
 
 BUILDING_API_KEY_RAW = st.secrets["BUILDING_API_KEY"]
 BUILDING_API_KEY_DECODED = urllib.parse.unquote(BUILDING_API_KEY_RAW)
+
 PERMIT_API_KEY_RAW = st.secrets["PERMIT_API_KEY"]
 PERMIT_API_KEY_DECODED = urllib.parse.unquote(PERMIT_API_KEY_RAW)
+
 JUSO_API_KEY = st.secrets["JUSO_API_KEY"]
 
 DEBUG = st.sidebar.checkbox("🔧 디버그 모드", value=False)
@@ -53,6 +55,23 @@ APARTMENT_BRAND_KEYWORDS = (
     "포레온", "올림픽파크", "센트라스", "파크",
 )
 VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
+
+# ============================================================
+# ★ 평 환산 유틸 (㎡ × 0.3025 = 평)
+# ============================================================
+def _fmt_area_with_pyeong(area_value, suffix=""):
+    """㎡ 값을 'XX.XX㎡ (YY평[ suffix])' 형식으로 포맷"""
+    try:
+        if area_value is None or area_value == "":
+            return ""
+        v = float(str(area_value).replace(",", "").replace("㎡", "").strip())
+        pyeong = round(v * 0.3025)
+        result = f"{v:.2f}㎡ ({pyeong}평)"
+        if suffix:
+            result += f" {suffix}"
+        return result
+    except (ValueError, TypeError):
+        return ""
 
 # ============================================================
 # 슬롯 유틸
@@ -95,14 +114,18 @@ def slot_picker_dialog(candidate, detail_key, base_key, next_slot_1based):
     detail_val = st.session_state.get(detail_key, "")
     final_val = combine_address(base_val, detail_val)
     st.caption(f"📝 입력될 주소: `{final_val}`")
+
     for slot_1b in range(1, MAX_ADDRESS + 1):
         label, is_next = slot_label(slot_1b, next_slot_1based)
-        if st.button(label, key=f"dlg_{base_key}_{slot_1b}",
-                     use_container_width=True,
-                     type="primary" if is_next else "secondary"):
+        if st.button(
+            label, key=f"dlg_{base_key}_{slot_1b}",
+            use_container_width=True,
+            type="primary" if is_next else "secondary",
+        ):
             final_value = combine_address(
                 candidate.get(base_key, ""),
-                st.session_state.get(detail_key, ""))
+                st.session_state.get(detail_key, ""),
+            )
             fill_slot(slot_1b - 1, final_value)
             st.session_state["_flash_msg"] = f"✅ 주소 {slot_1b}에 입력 완료: {final_value}"
             st.rerun()
@@ -366,7 +389,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
     return all_items, error_msg, debug_snippets
 
 # ============================================================
-# 매칭 엔진 유틸
+# 매칭 엔진
 # ============================================================
 def _bjdong_variants(bjdongCd, alt=None):
     variants = []
@@ -385,23 +408,30 @@ def _bjdong_variants(bjdongCd, alt=None):
     return variants
 
 
-def _safe_area(item):
-    fields = ("area", "exposArea", "전유면적", "exposPubuseArea",
-              "areaVal", "exclusiveArea", "전유면적(㎡)", "areaExposPubuse")
-    for field in fields:
-        raw = item.get(field)
-        if raw is None or raw == "":
-            continue
-        try:
-            cleaned = re.sub(r"[^\d.]", "", str(raw).replace(",", ""))
-            if not cleaned:
-                continue
-            v = float(cleaned)
-            if 1.0 <= v <= 2000.0:
-                return round(v, 2)
-        except (ValueError, TypeError):
-            continue
-    return None
+def _ho_matches(target_ho, ho_text):
+    target = str(target_ho).strip()
+    h = str(ho_text or "").strip()
+    if not target or not h:
+        return False
+    if is_match(target, h):
+        return True
+    for m in re.finditer(r"(\d+)\s*호", h):
+        if m.group(1) == target:
+            return True
+    h_cleaned = h
+    for _ in range(3):
+        h_cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", h_cleaned)
+        h_cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", h_cleaned)
+    if re.search(rf"(?<!\d){re.escape(target)}(?!\d)", h_cleaned):
+        return True
+    all_nums = re.findall(r"\d+", h)
+    if all_nums and all_nums[-1] == target:
+        return True
+    tokens = re.split(r"[\s\-_/]+", h)
+    for t in tokens:
+        if t == target:
+            return True
+    return False
 
 
 def _is_exclusive(item):
@@ -423,37 +453,40 @@ def _is_exclusive(item):
     return False
 
 
-# ★ 동 매칭 (제101동 같은 prefix 대응 포함)
 def _dong_matches(target_dong, item_dong):
     t = str(target_dong or "").strip()
     d = str(item_dong or "").strip()
-    if not t:
-        return True
-    if not d:
+    if not t or not d:
         return True
     if is_match(t, d):
         return True
-    # "제101동", "101동" 등 대응
-    if re.match(rf"^제?\s*{re.escape(t)}\s*동?$", d) or re.match(rf"^제?\s*{re.escape(d)}\s*동?$", t):
-        return True
-    # 층 표기("13층", "13F")는 동 정보 없음으로 간주
     if re.match(r"^\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)$", d):
         return True
     return False
 
 
-# ★★★ find_dedicated_area - 4단계 폴백 + 유니크 매칭 ★★★
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
         return None, "호수를 인식하지 못했습니다.", [], [], None
-    if not target_dong:
-        return None, "동(dongNm) 미입력 - 'OO동 OOO호' 형식으로 입력해주세요.", [], [], None
-
     expected_bldNm = expected_bldNm or []
     all_errors, all_debug = [], []
-    target_ho_s = str(target_ho).strip()
-    target_dong_s = str(target_dong).strip()
+
+    def _safe_area(item):
+        for field in ("area", "exposArea", "전유면적"):
+            raw = item.get(field)
+            if raw is None or raw == "":
+                continue
+            try:
+                cleaned = re.sub(r"[^\d.]", "", str(raw).replace(",", ""))
+                if not cleaned:
+                    continue
+                v = float(cleaned)
+                if 5.0 <= v <= 500.0:
+                    return round(v, 2)
+            except (ValueError, TypeError):
+                continue
+        return None
 
     def _bldnm_ok(item):
         if not expected_bldNm:
@@ -469,19 +502,34 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 return True
         return False
 
-    def _ho_contains(item):
-        """호수가 포함되기만 하면 True - 층 제거 후 숫자 토큰 매칭"""
-        h = str(item.get("hoNm", "")).strip()
-        if not h:
+    def _matches(item):
+        if not _is_exclusive(item):
             return False
-        cleaned = h
-        for _ in range(3):
-            cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", cleaned)
-            cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", cleaned)
-        tokens = re.findall(r"\d+", cleaned)
-        return target_ho_s in tokens
+        if not _bldnm_ok(item):
+            return False
+        h = (item.get("hoNm") or "").strip()
+        if not _ho_matches(target_ho, h):
+            return False
+        if target_dong:
+            d = (item.get("dongNm") or "").strip()
+            if not _dong_matches(target_dong, d):
+                return False
+        return True
 
-    # combos 생성
+    def _matches_relaxed(item):
+        h = (item.get("hoNm") or "").strip()
+        if not _ho_matches(target_ho, h):
+            return False
+        if target_dong:
+            d = (item.get("dongNm") or "").strip()
+            if not _dong_matches(target_dong, d):
+                return False
+        return True
+
+    def _matches_final(item):
+        h = (item.get("hoNm") or "").strip()
+        return _ho_matches(target_ho, h)
+
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bun_ji_candidates = [(bun, ji)]
     if ji != "0":
@@ -511,107 +559,30 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # ★ 1단계: 정확 hoNm 서버 필터 (첫 combo 빠른 시도)
-    if combos:
-        pg, bd, b, j = combos[0]
-        for extra in [{"hoNm": target_ho_s}, {"hoNm": f"{target_ho_s}호"}]:
-            def _fast(it):
-                return _ho_contains(it) and _is_exclusive(it) and _safe_area(it) is not None
+    filter_attempts = [{"hoNm": str(target_ho)}]
+    if target_dong:
+        filter_attempts.insert(0, {"dongNm": str(target_dong), "hoNm": str(target_ho)})
+
+    first_combo = combos[0] if combos else None
+    if first_combo:
+        pg, bd, b, j = first_combo
+        for extra in filter_attempts:
             area_list, err1, dbg1 = call_api_all_pages(
                 "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
-                match_check=_fast, extra_params=extra)
+                match_check=_matches, extra_params=extra)
             if err1:
                 all_errors.append(err1)
             all_debug.extend(dbg1)
             for a in area_list:
-                if not _fast(a):
-                    continue
-                val = _safe_area(a)
-                if val is not None:
-                    return val, f"정확매칭(hoNm={a.get('hoNm')})", all_errors, all_debug, a
+                if _matches(a):
+                    val = _safe_area(a)
+                    if val is not None:
+                        return val, "조회 성공 (필터)", all_errors, all_debug, a
 
-    # ★ 2단계: 전체 스캔 + 4단계 폴백
-    def _scan_items(items, source_label):
-        dong_items = [it for it in items if _dong_matches(target_dong_s, it.get("dongNm"))]
-        
-        # Tier 1: 같은 동 + 건물명 + 전유
-        for it in dong_items:
-            if not _ho_contains(it):
-                continue
-            if not _is_exclusive(it) or not _bldnm_ok(it):
-                continue
-            val = _safe_area(it)
-            if val is not None:
-                return (val, f"{source_label}-동+건물+전유(hoNm={it.get('hoNm')})", it)
-        
-        # Tier 2: 같은 동 + 전유 (건물명 무시)
-        for it in dong_items:
-            if not _ho_contains(it):
-                continue
-            if not _is_exclusive(it):
-                continue
-            val = _safe_area(it)
-            if val is not None:
-                return (val, f"{source_label}-동+전유(hoNm={it.get('hoNm')}, 건물명무시)", it)
-        
-        # Tier 3: 같은 동만 (전유/건물명 무시)
-        for it in dong_items:
-            if not _ho_contains(it):
-                continue
-            val = _safe_area(it)
-            if val is not None:
-                return (val, f"{source_label}-동만(hoNm={it.get('hoNm')}, 전유무시)", it)
-        
-        # ★ Tier 4: 동 무시 + 유니크 매칭 (같은 호가 전체에서 하나뿐일 때만)
-        unique_candidates = []
-        for it in items:
-            if not _ho_contains(it):
-                continue
-            if not _is_exclusive(it):
-                continue
-            val = _safe_area(it)
-            if val is not None:
-                unique_candidates.append((it, val))
-        
-        if len(unique_candidates) == 1:
-            it, val = unique_candidates[0]
-            d = (it.get("dongNm") or "").strip()
-            return (val, f"{source_label}-유니크호매칭(동무시, hoNm={it.get('hoNm')}, dongNm={d})", it)
-        
-        # 매칭 실패 → 상세 로그
-        all_hos_in_dong = sorted({(it.get("hoNm") or "").strip() for it in dong_items if (it.get("hoNm") or "").strip()})
-        all_hos_all = sorted({(it.get("hoNm") or "").strip() for it in items if (it.get("hoNm") or "").strip()})
-        all_dongs = sorted({(it.get("dongNm") or "").strip() for it in items if (it.get("dongNm") or "").strip()})
-        
-        ho_contains_samples = [
-            {"hoNm": (it.get("hoNm") or "").strip(),
-             "dongNm": (it.get("dongNm") or "").strip(),
-             "bldNm": (it.get("bldNm") or "").strip(),
-             "is_excl": _is_exclusive(it),
-             "bldnm_ok": _bldnm_ok(it),
-             "safe_area": _safe_area(it),
-             "area_raw": it.get("area"),
-             "exposArea_raw": it.get("exposArea")}
-            for it in items if _ho_contains(it)
-        ][:20]
-        
-        all_debug.append({
-            "endpoint": "match_log",
-            "source": source_label,
-            "target": f"{target_dong_s}동 {target_ho_s}호",
-            "total_items": len(items),
-            "dong_items": len(dong_items),
-            "unique_candidates_count": len(unique_candidates),
-            "all_dongs": all_dongs[:20],
-            "all_hos_in_target_dong": all_hos_in_dong[:30],
-            "all_hos_all": all_hos_all[:30],
-            "ho_contains_samples": ho_contains_samples,
-        })
-        return None
-
-    # 첫 combo 전체 조회
-    if combos:
-        pg, bd, b, j = combos[0]
+    survey_items = []
+    any_data_found = False
+    if first_combo:
+        pg, bd, b, j = first_combo
         area_list, err1, dbg1 = call_api_all_pages(
             "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
             match_check=None, extra_params=None, collect_all=True)
@@ -619,42 +590,50 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             all_errors.append(err1)
         all_debug.extend(dbg1)
         if area_list:
-            result = _scan_items(area_list, "첫combo")
-            if result:
-                return result[0], result[1], all_errors, all_debug, result[2]
+            any_data_found = True
+            survey_items.extend(area_list)
 
-    # 나머지 combo 순회
-    for pg, bd, b, j in combos[1:]:
-        area_list, err1, dbg1 = call_api_all_pages(
-            "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
-            match_check=None, extra_params=None, collect_all=True)
-        if err1:
-            all_errors.append(err1)
-        all_debug.extend(dbg1)
-        if not area_list:
-            continue
-        result = _scan_items(area_list, f"combo{pg}/{bd}")
-        if result:
-            return result[0], result[1], all_errors, all_debug, result[2]
+    if not survey_items:
+        for pg, bd, b, j in combos[1:]:
+            area_list, err1, dbg1 = call_api_all_pages(
+                "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
+                match_check=None, extra_params=None, collect_all=True)
+            if err1:
+                all_errors.append(err1)
+            all_debug.extend(dbg1)
+            if area_list:
+                any_data_found = True
+                survey_items.extend(area_list)
+                break
 
-    # 실패 - 마지막 로그 기반으로 원인 파악 메시지
-    last_log = next((d for d in reversed(all_debug) if d.get("endpoint") == "match_log"), None)
-    if last_log:
-        if last_log["unique_candidates_count"] == 0:
-            hos_sample = last_log["all_hos_all"][:10]
-            return None, (
-                f"'{target_dong_s}동 {target_ho_s}호' 전유부 없음 "
-                f"(데이터 내 hoNm 예시: {hos_sample})"
-            ), all_errors, all_debug, None
-        else:
-            return None, (
-                f"'{target_dong_s}동 {target_ho_s}호' 유사 후보 {last_log['unique_candidates_count']}개 - "
-                f"동 구분 불가 (동 목록: {last_log['all_dongs'][:5]})"
-            ), all_errors, all_debug, None
+    if survey_items:
+        for a in survey_items:
+            if _matches(a):
+                val = _safe_area(a)
+                if val is not None:
+                    return val, "조회 성공 (전체조회)", all_errors, all_debug, a
+        for a in survey_items:
+            if _matches_relaxed(a):
+                val = _safe_area(a)
+                if val is not None:
+                    return val, "조회 성공 (완화매칭)", all_errors, all_debug, a
+        for a in survey_items:
+            if _matches_final(a):
+                val = _safe_area(a)
+                if val is not None:
+                    return val, "조회 성공 (호수만 매칭)", all_errors, all_debug, a
 
-    return None, (
-        f"'{target_dong_s}동 {target_ho_s}호' 전유부 데이터 자체 없음"
-    ), all_errors, all_debug, None
+    if not any_data_found:
+        return None, f"전유부·표제부 모두 데이터 없음.", all_errors, all_debug, None
+
+    all_hos = sorted({(i.get("hoNm") or "").strip() for i in survey_items
+                      if (i.get("hoNm") or "").strip()})
+    similar_hos = [h for h in all_hos if _ho_matches(target_ho, h)]
+    hint = f"hoNm 예시: {', '.join(all_hos[:10])}"
+    if similar_hos:
+        hint += f" | ★ 매칭: {similar_hos}"
+    status = f"동/호 매칭 실패 | {hint}"
+    return None, status, all_errors, all_debug, None
 
 
 # ============================================================
@@ -767,6 +746,7 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
             break
     if not all_items_collected:
         return None, "표제부 정보 없음", all_debug
+
     chosen = all_items_collected[0]
     info = {
         "주용도코드": chosen.get("mainPurpsCd", "") or "",
@@ -855,7 +835,7 @@ def _housing_specificity(t):
 
 
 # ============================================================
-# 프로세스
+# 프로세스 (★ 평 환산 반영)
 # ============================================================
 def process_address(address, progress=None):
     if not address:
@@ -908,6 +888,7 @@ def process_address(address, progress=None):
         type_from_permit = normalize_hstp_type(
             permit_info["주택유형코드명"], permit_info.get("주택유형코드", ""))
 
+    # ★ 단독주택: 연면적 + 평 환산
     if type_from_title in ("단독주택", "단독(다가구)주택") and type_info:
         tot = type_info.get("연면적", "")
         plat = type_info.get("대지면적", "")
@@ -979,6 +960,7 @@ def process_address(address, progress=None):
                 housing_type_source = src
                 break
 
+    # ★ 전용면적 + 평 환산
     if area:
         conf = "확정" if (target_dong and target_ho) else "추정"
         return {
@@ -988,8 +970,9 @@ def process_address(address, progress=None):
             "주택유형": housing_type or "-",
             "유형출처": housing_type_source,
             "상태": f"{status} [{conf}]",
-        }, {"api_debug": api_debug}
+        }, {}
 
+    # ★ 연면적 폴백 + 평 환산
     if type_info and type_info.get("연면적"):
         try:
             tot_val = float(str(type_info["연면적"]).replace(",", ""))
@@ -999,8 +982,8 @@ def process_address(address, progress=None):
                 "대지면적": "",
                 "주택유형": housing_type or "-",
                 "유형출처": housing_type_source,
-                "상태": f"전유부 조회 실패 ({status})",
-            }, {"api_debug": api_debug}
+                "상태": "전유부 조회 실패, 표제부 연면적으로 대체",
+            }, {}
         except (ValueError, TypeError):
             pass
 
@@ -1008,7 +991,7 @@ def process_address(address, progress=None):
         "주소": address, "전용면적": "", "대지면적": "",
         "주택유형": housing_type or "-", "유형출처": housing_type_source,
         "상태": status,
-    }, {"api_debug": api_debug}
+    }, {}
 
 
 # ============================================================
@@ -1017,10 +1000,8 @@ def process_address(address, progress=None):
 def _background_query(query_id, addresses, user_id):
     status_path = os.path.join(QUERY_DIR, f"{user_id}_{query_id}_status.json")
     results_path = os.path.join(QUERY_DIR, f"{user_id}_{query_id}_results.json")
-    debug_path = os.path.join(QUERY_DIR, f"{user_id}_{query_id}_debug.json")
     try:
         results = []
-        debug_bundles = []
         for i, addr in enumerate(addresses, 1):
             try:
                 with open(status_path, "w", encoding="utf-8") as f:
@@ -1030,16 +1011,13 @@ def _background_query(query_id, addresses, user_id):
             except IOError:
                 pass
             try:
-                result, dbg = process_address(addr, progress=None)
-                debug_bundles.append({"주소": addr, "debug": dbg})
+                result, _ = process_address(addr, progress=None)
             except Exception as e:
                 result = {"주소": addr, "전용면적": "", "대지면적": "",
                           "주택유형": "", "유형출처": "", "상태": f"오류: {e}"}
             results.append(result)
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False)
-        with open(debug_path, "w", encoding="utf-8") as f:
-            json.dump(debug_bundles, f, ensure_ascii=False)
         with open(status_path, "w", encoding="utf-8") as f:
             json.dump({"status": "done", "total": len(addresses)}, f, ensure_ascii=False)
     except Exception as e:
@@ -1160,6 +1138,9 @@ def render_query_status():
 # ============================================================
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
+# ============================================================
+# ★ 최근 조회 결과 (모든 결과 / 기본 접힘 / 눈에 안 띄는 토글)
+# ============================================================
 if "show_recent" not in st.session_state:
     st.session_state.show_recent = False
 
@@ -1187,22 +1168,35 @@ if recent_files:
             box-shadow: none !important;
             justify-content: flex-start !important;
           }
-          div.recent-toggle .stButton > button:hover { color: #777 !important; }
-          div.recent-toggle .stButton > button:focus { color: #777 !important; box-shadow: none !important; }
+          div.recent-toggle .stButton > button:hover {
+            color: #777 !important;
+            background: transparent !important;
+            border: none !important;
+          }
+          div.recent-toggle .stButton > button:focus {
+            color: #777 !important;
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+          }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
     st.markdown('<div class="recent-toggle">', unsafe_allow_html=True)
     arrow = "▾" if st.session_state.show_recent else "▸"
-    if st.button(f"{arrow} 최근 조회 결과 {len(recent_files)}건", key="toggle_recent_btn"):
+    if st.button(
+        f"{arrow} 최근 조회 결과 {len(recent_files)}건",
+        key="toggle_recent_btn",
+    ):
         st.session_state.show_recent = not st.session_state.show_recent
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.session_state.show_recent:
         with st.container(border=True):
-            st.caption("📌 최근 조회 결과입니다.")
+            st.caption("📌 최근 조회 결과입니다. (탭을 닫아도 여기 남아있음)")
             for rf in recent_files:
                 try:
                     mtime = datetime.fromtimestamp(os.path.getmtime(rf)).strftime("%m-%d %H:%M")
@@ -1223,7 +1217,7 @@ if recent_files:
 # ============================================================
 # 도로명주소 검색
 # ============================================================
-with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기", expanded=False):
+with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 (주소를 모를 때)", expanded=False):
     st.caption("건물명 또는 주소 일부를 입력하세요.")
     if "search_candidates" not in st.session_state:
         st.session_state.search_candidates = []
@@ -1327,12 +1321,14 @@ for i in range(st.session_state.address_count):
 
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
 with ctrl_col1:
-    if st.button("➕ 주소 추가", disabled=(st.session_state.address_count >= MAX_ADDRESS),
+    if st.button("➕ 주소 추가",
+                 disabled=(st.session_state.address_count >= MAX_ADDRESS),
                  use_container_width=True, key="btn_add_addr"):
         st.session_state.address_count += 1
         st.rerun()
 with ctrl_col2:
-    if st.button("➖ 마지막 삭제", disabled=(st.session_state.address_count <= 1),
+    if st.button("➖ 마지막 삭제",
+                 disabled=(st.session_state.address_count <= 1),
                  use_container_width=True, key="btn_remove_addr"):
         remove_idx = st.session_state.address_count - 1
         st.session_state.pop(f"address_{remove_idx}", None)
@@ -1352,11 +1348,14 @@ if do_query:
         st.stop()
     query_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     st.session_state["_current_query_id"] = query_id
-    thread = threading.Thread(target=_background_query,
-                              args=(query_id, targets, USER_ID), daemon=True)
+    thread = threading.Thread(
+        target=_background_query,
+        args=(query_id, targets, USER_ID),
+        daemon=True,
+    )
     thread.start()
     st.success(f"🚀 백그라운드 조회 시작! (ID: `{query_id}`)")
-    st.info("💡 탭을 닫아도 서버가 살아있으면 조회가 계속됩니다.")
+    st.info("💡 탭을 닫아도 서버가 살아있으면 조회가 계속됩니다. 다시 접속하면 상단 **최근 조회 결과**에서 확인하세요.")
     time.sleep(0.5)
     st.rerun()
 
