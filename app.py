@@ -385,7 +385,6 @@ def _bjdong_variants(bjdongCd, alt=None):
     return variants
 
 
-# ★★★ 면적 필드 확장 ★★★
 def _safe_area(item):
     fields = ("area", "exposArea", "전유면적", "exposPubuseArea",
               "areaVal", "exclusiveArea", "전유면적(㎡)", "areaExposPubuse")
@@ -405,7 +404,6 @@ def _safe_area(item):
     return None
 
 
-# ★★★ 전유 판별 (관대) ★★★
 def _is_exclusive(item):
     cd = str(item.get("exposPubuseGbCd", "")).strip()
     nm = str(item.get("exposPubuseGbCdNm", "")).strip()
@@ -425,30 +423,24 @@ def _is_exclusive(item):
     return False
 
 
-# ★★★ 동 매칭 - 절대 무시 안 함 ★★★
+# ★★★ 동 매칭 - 층표기/빈값 허용 (오래된 대장 호환) ★★★
 def _dong_matches(target_dong, item_dong):
-    """target_dong이 있으면 반드시 매칭되어야 함 (층 표기 예외만 허용)"""
     t = str(target_dong or "").strip()
     d = str(item_dong or "").strip()
     if not t:
         return True
     if not d:
-        return False
+        return True  # dongNm 비어있음 → 지번 스코프 내이므로 통과
     if is_match(t, d):
+        return True
+    # ★ 층 표기("13층", "13F")는 동 정보 없음으로 간주 → 통과
+    if re.match(r"^\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)$", d):
         return True
     return False
 
 
-# ★★★ find_dedicated_area - 동으로 완전 격리 ★★★
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
-    """
-    1) 정확한 hoNm 필터로 빠른 시도 (같은 동 한정)
-    2) 첫 combo 전체 조회 → 같은 동 데이터만 로컬 필터
-       - 정확 hoNm 우선 → 층 포함 hoNm ("13층1301")
-    3) 첫 combo에 동 데이터 없으면 나머지 combo 순회 (동일 로직)
-    4) 실패 시 다른 동 데이터 절대 사용 X
-    """
     if not target_ho:
         return None, "호수를 인식하지 못했습니다.", [], [], None
     if not target_dong:
@@ -525,7 +517,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # ── 1단계: 정확 hoNm 필터 (첫 combo, 서버 측) ──
+    # ── 1단계: 정확 hoNm 서버 필터 (첫 combo) ──
     if combos:
         pg, bd, b, j = combos[0]
         exact_filters = [
@@ -553,7 +545,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 if val is not None:
                     return val, f"정확매칭(hoNm={a.get('hoNm')})", all_errors, all_debug, a
 
-    # ── 2단계: 첫 combo 전체 조회 → 동 필터 + 정확/층 포함 매칭 ──
+    # ── 2단계: 첫 combo 전체 조회 → 동 필터 + 정확/층포함 매칭 ──
     def _scan_items(items, source_label):
         dong_items = [it for it in items
                       if _dong_matches(target_dong_s, it.get("dongNm"))]
@@ -600,7 +592,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             if result:
                 return result[0], result[1], all_errors, all_debug, result[2]
 
-            # 매칭 실패 로그
             dong_items = [it for it in area_list
                           if _dong_matches(target_dong_s, it.get("dongNm"))]
             all_debug.append({
@@ -633,7 +624,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if result:
             return result[0], result[1], all_errors, all_debug, result[2]
 
-    # ── 4단계: 실패 ──
     return None, (
         f"'{target_dong_s}동 {target_ho_s}호' 전유부 없음 "
         f"(같은 동에 '{target_ho_s}' 또는 '13층{target_ho_s}' 형식 데이터 미발견)"
