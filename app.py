@@ -135,14 +135,6 @@ def validate_juso(ui, ji):
     jn = ja.replace(" ", "")
     return ur.replace(" ","") in jn and un in jn
 
-def parse_rel_jibun(rjs):
-    r = []
-    if not rjs: return r
-    for tok in re.split(r"[,，]", rjs):
-        m = re.search(r"(\d+)(?:-(\d+))?", tok.strip())
-        if m: r.append((m.group(1), m.group(2) or "0"))
-    return r
-
 # ============================================================
 # Juso
 # ============================================================
@@ -205,7 +197,7 @@ def search_address_candidates(kw, cnt=20):
     return res, None
 
 # ============================================================
-# ★ 국토부 API - dedupe 없음 + 페이지 수 기반 종료
+# ★ 국토부 API - match_check 조기 종료 지원
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
@@ -342,11 +334,15 @@ def _ho_match(ht, th):
     return False
 
 # ============================================================
-# find_dedicated_area
+# ★ find_dedicated_area - 조기 종료 최적화
 # ============================================================
-def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd, target_dong, target_ho, juso=None, expected_bldNm=None):
-    if not target_ho: return None, "호수 미인식", [], [], None
-    if not target_dong: return None, "동 미입력", [], [], None
+def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
+                        target_dong, target_ho, juso=None, expected_bldNm=None):
+    if not target_ho:
+        return None, "호수 미인식", [], [], None
+    if not target_dong:
+        return None, "동 미입력", [], [], None
+
     eb = expected_bldNm or []
     errs, dbgs = [], []
     ths = str(target_ho).strip(); tds = str(target_dong).strip()
@@ -360,20 +356,17 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd, target_dong, tar
             if en and (en == ib or en in ib or ib in en): return True
         return False
 
-    def _try(items, relaxed_dong):
-        for it in items:
-            h = (it.get("hoNm") or "").strip()
-            if not _ho_match(h, ths): continue
-            d = (it.get("dongNm") or "").strip()
-            if not relaxed_dong:
-                if not d or not is_match(tds, d): continue
-            else:
-                if d and not _dong_match(tds, d): continue
-            if not _is_excl(it): continue
-            if not _bld_ok(it): continue
-            v = _safe_area(it)
-            if v is not None: return (v, it)
-        return None
+    def _match_item(it, relaxed=False):
+        h = (it.get("hoNm") or "").strip()
+        if not _ho_match(h, ths): return None
+        d = (it.get("dongNm") or "").strip()
+        if not relaxed:
+            if not d or not is_match(tds, d): return None
+        else:
+            if d and not _dong_match(tds, d): return None
+        if not _is_excl(it): return None
+        if not _bld_ok(it): return None
+        return _safe_area(it)
 
     bdv = _bjdong_vars(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bjc = [(bun, ji)]
@@ -395,75 +388,90 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd, target_dong, tar
         for bd in bdv:
             for b, j in bju: _add(pg, bd, b, j)
 
-    # 1단계: 전체 수집
+    # ★ 조기 종료 검색
+    def _fast(flt, rel):
+        for combo in combos:
+            pg, bd, b, j = combo
+            matched = [None]
+            def _mc(it):
+                v = _match_item(it, rel)
+                if v is not None:
+                    matched[0] = (v, it)
+                    return True
+                return False
+            items, er, dg = call_api_all_pages(
+                "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
+                extra_params=flt, match_check=_mc, collect_all=False)
+            dbgs.extend(dg)
+            if er: errs.append(er)
+            if matched[0]: return matched[0]
+        return None
+
+    fast_attempts = [
+        ({"dongNm": f"{tds}동", "hoNm": ths}, False, "동+호필터(엄격)"),
+        ({"dongNm": f"{tds}동", "hoNm": f"{ths}호"}, False, "동+호필터(호)(엄격)"),
+        ({"hoNm": ths}, False, "호필터(엄격)"),
+        ({"hoNm": f"{ths}호"}, False, "호필터(호)(엄격)"),
+        ({"dongNm": f"{tds}동"}, False, "동필터(엄격)"),
+        ({"dongNm": f"{tds}동"}, True, "동필터(관대)"),
+        (None, False, "전체스캔(엄격)"),
+        (None, True, "전체스캔(관대)"),
+    ]
+    for flt, rel, label in fast_attempts:
+        m = _fast(flt, rel)
+        if m:
+            return m[0], f"{label}-조기매칭", errs, dbgs, m[1]
+
+    # 진단용 (첫 combo만 전체 스캔)
     all_items = []
-    for pg, bd, b, j in combos:
-        it, er, dg = call_api_all_pages("getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j, collect_all=True)
-        all_items.extend(it); dbgs.extend(dg)
+    if combos:
+        pg, bd, b, j = combos[0]
+        items, er, dg = call_api_all_pages(
+            "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j, collect_all=True)
+        all_items.extend(items); dbgs.extend(dg)
         if er: errs.append(er)
 
     if not all_items:
         return None, "전유부 데이터 자체 없음", errs, dbgs, None
 
-    m = _try(all_items, False)
-    if m: return m[0], f"엄격동(수집{len(all_items)})", errs, dbgs, m[1]
-    m = _try(all_items, True)
-    if m: return m[0], f"관대동(수집{len(all_items)})", errs, dbgs, m[1]
+    tdig = re.sub(r"[^\d]","",_norm_dig(ths))
+    try: tint = int(tdig)
+    except ValueError: tint = None
 
-    # 2단계: 서버 필터 fallback
-    for pg, bd, b, j in combos:
-        for flt in [{"hoNm": ths}, {"hoNm": f"{ths}호"}]:
-            it, er, dg = call_api_all_pages("getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j, extra_params=flt, collect_all=True)
-            dbgs.extend(dg)
-            if er: errs.append(er)
-            if not it: continue
-            mt = [x for x in it if _ho_match(x.get("hoNm",""), ths)]
-            if not mt: continue
-            m = _try(mt, True)
-            if m: return m[0], f"서버필터({flt.get('hoNm')})-{len(mt)}건", errs, dbgs, m[1]
+    def _contains(h):
+        if tint is None: return False
+        for n in _extract_nums(h):
+            try:
+                if int(n) == tint: return True
+            except ValueError: pass
+        return False
 
-    # 진단
+    strict = [x for x in all_items if str(x.get("dongNm","")).strip() and is_match(tds, x.get("dongNm"))]
+    sh = [x for x in strict if _contains(x.get("hoNm",""))]
+    ah = [x for x in all_items if _contains(x.get("hoNm",""))]
     tot_r = 0
     for d in dbgs:
         if isinstance(d, dict) and "total_reported" in d: tot_r = max(tot_r, d["total_reported"])
-    strict = [x for x in all_items if str(x.get("dongNm","")).strip() and is_match(tds, x.get("dongNm"))]
-    td_ = re.sub(r"[^\d]","",_norm_dig(ths))
-    def _contains(h):
-        if not td_: return False
-        try: ti = int(td_)
-        except ValueError: return False
-        for n in _extract_nums(h):
-            try:
-                if int(n) == ti: return True
-            except ValueError: pass
-        return False
-    strict_hits = [x for x in strict if _contains(x.get("hoNm",""))]
-    all_hits = [x for x in all_items if _contains(x.get("hoNm",""))]
-    msg = f"[{tds}동 {ths}호] 수집 {len(all_items)}/{tot_r}건 | {tds}동 {len(strict)}건"
-    if strict_hits:
-        c = strict_hits[0]; rs = []
-        if not _is_excl(c): rs.append(f"공용")
-        if not _bld_ok(c): rs.append(f"건물명(bldNm={c.get('bldNm')})")
+    msg = f"[{tds}동 {ths}호] 수집 {len(all_items)}/{tot_r}건"
+    if sh:
+        c = sh[0]; rs = []
+        if not _is_excl(c): rs.append("공용")
+        if not _bld_ok(c): rs.append("건물명")
         if _safe_area(c) is None: rs.append(f"면적없음(area={c.get('area')})")
         msg += f" | hoNm='{c.get('hoNm')}' 있음"
-        if rs: msg += f" / 실패: {' / '.join(rs)}"
-    elif all_hits:
-        oth = [x for x in all_hits if not is_match(tds, x.get("dongNm"))]
+        if rs: msg += f" / 실패: {','.join(rs)}"
+    elif ah:
+        oth = [x for x in ah if not is_match(tds, x.get("dongNm"))]
         if oth:
             ds = sorted({(x.get("dongNm") or "").strip() for x in oth if (x.get("dongNm") or "").strip()})
-            hs = [(x.get("hoNm") or "").strip() for x in oth[:3]]
-            msg += f" | ⚠️ 다른동에만: dongNm={ds[:5]}, hoNm={hs}"
+            msg += f" | ⚠️ 다른동에만: {ds[:5]}"
     else:
         ad = sorted({(x.get("dongNm") or "").strip() for x in all_items if (x.get("dongNm") or "").strip()})
         msg += f" | 전체에 없음 | 동: {ad[:10]}"
-        an = set()
-        for x in all_items: an.update(_extract_nums(x.get("hoNm","")))
-        sim = sorted([n for n in an if len(n) >= 3 and len(td_) >= 2 and (n.startswith(td_[:2]) or n.endswith(td_[-2:]))])[:15]
-        if sim: msg += f" | 유사: {sim}"
     return None, msg, errs, dbgs, None
 
 # ============================================================
-# 총괄표제부
+# 총괄표제부 / 인허가 / 표제부
 # ============================================================
 def _fetch_recap(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
     bdv = _bjdong_vars(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
@@ -480,9 +488,6 @@ def _fetch_recap(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                         "연면적": x.get("totArea","") or "", "대지면적": x.get("platArea","") or "", "건축면적": x.get("archArea","") or ""}, dg
     return None, dg
 
-# ============================================================
-# 인허가
-# ============================================================
 def fetch_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
     url = f"{BUILDING_API_BASE}/getBrHstpInfo"
     bdv = _bjdong_vars(bjdongCd); pcs = [platGbCd] + [x for x in ("0","1","2") if x != platGbCd]
@@ -524,9 +529,6 @@ def norm_hstp(cn, cd=""):
     if c == "3": return "공동주택"
     return n or ""
 
-# ============================================================
-# 표제부
-# ============================================================
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None, target_dong="", target_ho=""):
     bdv = _bjdong_vars(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     pcs = [platGbCd] + [x for x in ("0","1","2") if x != platGbCd]
