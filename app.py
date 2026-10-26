@@ -300,14 +300,18 @@ def search_address_candidates(keyword, count=20):
     return results, None
 
 # ============================================================
-# 국토부 API 호출
+# 국토부 API 호출 (★ 페이지네이션 버그 수정)
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
     url = f"{BUILDING_API_BASE}/{endpoint}"
     all_items, page, error_msg, debug_snippets = [], 1, None, []
-    ROWS_PER_PAGE, MAX_PAGES = 1000, 40
+    ROWS_PER_PAGE = 1000
+    MAX_PAGES = 100
     total_pages_needed = None
+    total_count_reported = 0
+    page_size_actual = 0
+
     while True:
         params = {"serviceKey": BUILDING_API_KEY_DECODED,
                   "sigunguCd": sigunguCd, "bjdongCd": bjdongCd,
@@ -348,23 +352,44 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                 item_list = [item_list]
             if not item_list:
                 break
+
+            if page == 1:
+                page_size_actual = len(item_list)
+
             all_items.extend(item_list)
-            total_count = int(body.get("totalCount", 0) or 0)
+            total_count_reported = int(body.get("totalCount", 0) or 0)
+
             if total_pages_needed is None:
-                total_pages_needed = max(1, -(-total_count // ROWS_PER_PAGE))
+                effective_page_size = max(page_size_actual, 1)
+                total_pages_needed = max(1, -(-total_count_reported // effective_page_size))
+                if page == 1:
+                    debug_snippets.append({
+                        "endpoint": endpoint,
+                        "totalCount": total_count_reported,
+                        "page_size_actual": page_size_actual,
+                        "total_pages_needed": total_pages_needed,
+                    })
+
             if match_check is not None and not collect_all:
                 for it in item_list:
                     if match_check(it):
                         return all_items, error_msg, debug_snippets
-            if len(all_items) >= total_count:
+
+            if len(all_items) >= total_count_reported:
                 break
             if page >= min(total_pages_needed, MAX_PAGES):
                 break
             page += 1
-            time.sleep(0.4)
+            time.sleep(0.3)
         except requests.exceptions.RequestException as e:
             error_msg = f"[{endpoint}] 요청 실패: {e}"
             break
+
+    if total_count_reported > len(all_items):
+        debug_snippets.append({
+            "endpoint": endpoint,
+            "warning": f"수집 미완료: totalCount={total_count_reported}, collected={len(all_items)}",
+        })
     return all_items, error_msg, debug_snippets
 
 # ============================================================
@@ -388,7 +413,6 @@ def _bjdong_variants(bjdongCd, alt=None):
 
 
 def _normalize_digits(s):
-    """전각 숫자/문자 → 반각, 특수공백 제거"""
     if s is None:
         return ""
     s = str(s)
@@ -453,45 +477,32 @@ def _dong_matches(target_dong, item_dong):
 
 
 def _is_ho_match(ho_text, target_ho):
-    """
-    hoNm에 target이 매칭되는지 - 숫자 기반 관대 매칭
-      1) 정확 일치: "1206", "1206호", "제1206호"
-      2) 숫자 추출 후 target 포함: "12층1206호" → [12, 1206] → 1206 매칭
-    """
     h = str(ho_text or "").strip()
     t = str(target_ho or "").strip()
     if not h or not t:
         return False
-
     h_norm = _normalize_digits(h)
     t_digits = re.sub(r"[^\d]", "", _normalize_digits(t))
     if not t_digits:
         return False
-
     try:
         t_int = int(t_digits)
     except ValueError:
         return False
-
-    # 1) 정확 일치 variants
     t_variants = {t_digits, f"{t_digits}호", f"제{t_digits}", f"제{t_digits}호"}
     if h_norm in t_variants:
         return True
-
-    # 2) 숫자 추출 후 target 존재 여부
-    nums = re.findall(r"\d+", h_norm)
-    for n in nums:
+    for n in re.findall(r"\d+", h_norm):
         try:
             if int(n) == t_int:
                 return True
         except ValueError:
             continue
-
     return False
 
 
 # ============================================================
-# find_dedicated_area
+# find_dedicated_area (강화된 진단)
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
@@ -548,7 +559,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # 1단계: 전체 수집
     all_items = []
     for pg, bd, b, j in combos:
         area_list, err1, dbg1 = call_api_all_pages(
@@ -563,7 +573,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     if not all_items:
         return None, "전유부 데이터 자체 없음", all_errors, all_debug, None
 
-    # 2단계: 동 필터
     strict_dong_items = [
         it for it in all_items
         if str(it.get("dongNm", "")).strip() and
@@ -574,7 +583,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if _dong_matches(target_dong_s, it.get("dongNm"))
     ]
 
-    # 3단계: 매칭
     def _try_match(items, tier_name):
         for it in items:
             h = (it.get("hoNm") or "").strip()
@@ -599,69 +607,75 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if result:
             return result[0], result[1], all_errors, all_debug, result[2]
 
-    # 4단계: 실패 - 상세 로그
-    all_dongs = sorted({(it.get("dongNm") or "").strip()
-                        for it in all_items if (it.get("dongNm") or "").strip()})
-    ho_samples_in_dong = sorted({(it.get("hoNm") or "").strip()
-                                 for it in permissive_dong_items
-                                 if (it.get("hoNm") or "").strip()})
-    all_ho_samples = sorted({(it.get("hoNm") or "").strip()
-                             for it in all_items if (it.get("hoNm") or "").strip()})
-    ho_candidates = [it for it in permissive_dong_items
-                     if _is_ho_match(it.get("hoNm") or "", target_ho_s)]
+    # 진단
+    target_digits = re.sub(r"[^\d]", "", _normalize_digits(target_ho_s))
+    try:
+        target_int = int(target_digits)
+    except ValueError:
+        target_int = None
 
-    all_debug.append({
-        "endpoint": "match_log",
-        "target": f"{target_dong_s}동 {target_ho_s}호",
-        "target_ho_digits": target_ho_s,
-        "total_items": len(all_items),
-        "strict_dong_items": len(strict_dong_items),
-        "permissive_dong_items": len(permissive_dong_items),
-        "ho_candidates_count": len(ho_candidates),
-        "all_dongs": all_dongs[:20],
-        "ho_samples_in_dong": ho_samples_in_dong[:30],
-        "all_ho_samples": all_ho_samples[:30],
-        "ho_candidate_details": [
-            {
-                "hoNm": (it.get("hoNm") or "").strip(),
-                "hoNm_numbers": _extract_numbers(it.get("hoNm") or ""),
-                "dongNm": (it.get("dongNm") or "").strip(),
-                "bldNm": (it.get("bldNm") or "").strip(),
-                "area_raw": it.get("area"),
-                "exposArea_raw": it.get("exposArea"),
-                "safe_area": _safe_area(it),
-                "is_exclusive": _is_exclusive(it),
-                "bldnm_ok": _bldnm_ok(it),
-                "dong_match_strict": is_match(target_dong_s, it.get("dongNm")),
-                "dong_match_permissive": _dong_matches(target_dong_s, it.get("dongNm")),
-            }
-            for it in ho_candidates[:20]
-        ],
-    })
+    def _num_contains(hoNm):
+        if target_int is None:
+            return False
+        for n in _extract_numbers(hoNm):
+            try:
+                if int(n) == target_int:
+                    return True
+            except ValueError:
+                pass
+        return False
 
-    msg_parts = [f"'{target_dong_s}동 {target_ho_s}호' 전유부 없음"]
-    if ho_candidates:
-        c = ho_candidates[0]
-        details = []
-        if _safe_area(c) is None:
-            details.append(f"면적없음(area={c.get('area')}, exposArea={c.get('exposArea')})")
+    strict_hits = [it for it in strict_dong_items if _num_contains(it.get("hoNm", ""))]
+    all_hits = [it for it in all_items if _num_contains(it.get("hoNm", ""))]
+
+    total_reported = 0
+    for d in all_debug:
+        if isinstance(d, dict) and "totalCount" in d:
+            total_reported = max(total_reported, d["totalCount"])
+    collect_info = f"수집 {len(all_items)}/{total_reported}건" if total_reported else f"수집 {len(all_items)}건"
+
+    msg = f"[{target_dong_s}동 {target_ho_s}호] {collect_info}"
+
+    if strict_hits:
+        c = strict_hits[0]
+        reasons = []
         if not _is_exclusive(c):
-            details.append(f"공용판정(cd={c.get('exposPubuseGbCd')}, nm={c.get('exposPubuseGbCdNm')})")
+            reasons.append(f"공용(cd={c.get('exposPubuseGbCd')}, nm={c.get('exposPubuseGbCdNm')})")
         if not _bldnm_ok(c):
-            details.append(f"건물명불일치(bldNm={c.get('bldNm')})")
-        if not _dong_matches(target_dong_s, c.get("dongNm")):
-            details.append(f"동불일치(dongNm={c.get('dongNm')})")
-        if details:
-            msg_parts.append(f"hoNm='{c.get('hoNm')}' 후보 있음, 사유: {' / '.join(details)}")
+            reasons.append(f"건물명불일치(bldNm={c.get('bldNm')})")
+        if _safe_area(c) is None:
+            reasons.append(f"면적없음(area={c.get('area')}, exposArea={c.get('exposArea')})")
+        msg += f" | 같은동 {target_ho_s} 발견: hoNm='{c.get('hoNm')}'"
+        if reasons:
+            msg += f" / 실패사유: {' / '.join(reasons)}"
         else:
-            msg_parts.append(f"hoNm='{c.get('hoNm')}' 후보 있으나 알수없는 사유")
-    else:
-        if all_dongs:
-            msg_parts.append(f"데이터의 동: {all_dongs[:5]}")
-        if ho_samples_in_dong:
-            msg_parts.append(f"같은 동 hoNm 예시: {ho_samples_in_dong[:8]}")
+            msg += " / 알수없는 사유"
 
-    return None, " | ".join(msg_parts), all_errors, all_debug, None
+    elif all_hits:
+        other = [it for it in all_hits if not is_match(target_dong_s, it.get("dongNm"))]
+        if other:
+            d_samples = sorted({(it.get("dongNm") or "").strip() for it in other if (it.get("dongNm") or "").strip()})
+            h_samples = [(it.get("hoNm") or "").strip() for it in other[:3]]
+            msg += f" | ⚠️ {target_dong_s}동엔 없고 다른동에 있음: dongNm={d_samples[:5]}, hoNm={h_samples}"
+
+    else:
+        all_nums = set()
+        for it in all_items:
+            all_nums.update(_extract_numbers(it.get("hoNm", "")))
+        similar = sorted([n for n in all_nums
+                          if (n.startswith(target_digits[:2]) if len(target_digits) >= 2 else False)
+                          or (n.endswith(target_digits[-2:]) if len(target_digits) >= 2 else False)])[:15]
+        all_dongs = sorted({(it.get("dongNm") or "").strip() for it in all_items if (it.get("dongNm") or "").strip()})
+        msg += f" | {target_ho_s} 전체 데이터에 없음"
+        if similar:
+            msg += f" | 유사숫자: {similar}"
+        if all_dongs:
+            target_exists = any(is_match(target_dong_s, d) for d in all_dongs)
+            msg += f" | 동 목록: {all_dongs[:10]}"
+            if not target_exists:
+                msg += f" ⚠️ {target_dong_s}동 없음"
+
+    return None, msg, all_errors, all_debug, None
 
 
 # ============================================================
