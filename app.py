@@ -55,22 +55,6 @@ APARTMENT_BRAND_KEYWORDS = (
 VILLA_LIKE_KEYWORDS = ("빌라", "타운하우스", "빌", "홈타운")
 
 # ============================================================
-# 평 환산 유틸
-# ============================================================
-def _fmt_area_with_pyeong(area_value, suffix=""):
-    try:
-        if area_value is None or area_value == "":
-            return ""
-        v = float(str(area_value).replace(",", "").replace("㎡", "").strip())
-        pyeong = round(v * 0.3025)
-        result = f"{v:.2f}㎡ ({pyeong}평)"
-        if suffix:
-            result += f" {suffix}"
-        return result
-    except (ValueError, TypeError):
-        return ""
-
-# ============================================================
 # 슬롯 유틸
 # ============================================================
 def get_next_empty_slot():
@@ -440,7 +424,7 @@ def _is_exclusive(item):
 
 
 def _dong_matches(target_dong, item_dong):
-    """동 그대로 (permissive)"""
+    """동 처리 - 기존 그대로"""
     t = str(target_dong or "").strip()
     d = str(item_dong or "").strip()
     if not t or not d:
@@ -452,7 +436,7 @@ def _dong_matches(target_dong, item_dong):
     return False
 
 
-# ★★★ 정확매칭 - 동일 호수 문자열 그대로 ★★★
+# ★★★ 정확매칭: 1202, 1202호, 제1202호 등 ★★★
 def _is_exact_ho(ho_text, target_ho):
     h = str(ho_text or "").strip()
     t = str(target_ho or "").strip()
@@ -460,24 +444,18 @@ def _is_exact_ho(ho_text, target_ho):
         return False
     h_compact = re.sub(r"\s+", "", h)
     t_compact = re.sub(r"\s+", "", t)
-    # 정확 일치 variants
-    exact_variants = [
+    variants = [
         t_compact,
         f"{t_compact}호",
         f"제{t_compact}호",
         f"제{t_compact}",
         f"{t_compact}호실",
     ]
-    return h_compact in exact_variants
+    return h_compact in variants
 
 
-# ★★★ 층prefix 매칭 - 1202 → 12층1202 ★★★
+# ★★★ 층prefix: 1202 → 12층1202, 12층 1202호 등 ★★★
 def _is_floor_prefixed_ho(ho_text, target_ho):
-    """
-    target "1202"에 대해:
-      - "12층1202", "12층 1202", "12층1202호", "12F1202" 등 매칭
-      - 층 숫자는 target의 앞 1~3자리에서 유도
-    """
     h = str(ho_text or "").strip()
     t = str(target_ho or "").strip()
     if not h or not t or not t.isdigit():
@@ -485,16 +463,19 @@ def _is_floor_prefixed_ho(ho_text, target_ho):
 
     h_compact = re.sub(r"\s+", "", h)
 
-    # 층 숫자 유도: 앞 1자리, 2자리, 3자리 조합으로 시도
+    # 앞 1~3자리로 층 유도
     max_prefix = min(3, len(t))
     for plen in range(1, max_prefix + 1):
         floor = t[:plen]
-        # 해당 층+호수 패턴들
+        try:
+            ho_int = int(t)
+        except ValueError:
+            ho_int = t
         patterns = [
             f"{floor}층{t}",
             f"{floor}층{t}호",
-            f"{floor}층{int(t)}",       # 앞자리 0 제거
-            f"{floor}층{int(t)}호",
+            f"{floor}층{ho_int}",
+            f"{floor}층{ho_int}호",
             f"{floor}F{t}",
             f"{floor}f{t}",
             f"{floor}층-{t}",
@@ -502,15 +483,14 @@ def _is_floor_prefixed_ho(ho_text, target_ho):
         if h_compact in patterns:
             return True
 
-    # 폴백: 층 표기만 제거했을 때 target이 정확히 남는지
+    # 폴백: 층 표기 제거 후 target만 남는지
     cleaned = h_compact
     for _ in range(3):
         cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", cleaned)
         cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", cleaned)
-    cleaned = re.sub(r"[^\d]", "", cleaned)  # 숫자만
-    # cleaned가 target과 정확히 같을 때만 (부분매칭 방지)
-    if cleaned == t:
-        # 원본 h에 target 외 다른 큰 숫자(예: 다른 층 호수)가 없는지 확인
+    cleaned_nums = re.sub(r"[^\d]", "", cleaned)
+    if cleaned_nums == t:
+        # 다른 큰 숫자(3자리 이상)가 있으면 오탐 방지
         other_nums = [n for n in re.findall(r"\d+", h_compact)
                       if n != t and len(n) >= 3]
         if not other_nums:
@@ -520,7 +500,7 @@ def _is_floor_prefixed_ho(ho_text, target_ho):
 
 
 # ============================================================
-# ★★★ find_dedicated_area - 호수 재검색 로직 ★★★
+# ★★★ find_dedicated_area - 동 유지 + 정확→층prefix 재검색 ★★★
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
@@ -548,7 +528,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 return True
         return False
 
-    # combos 생성
+    # combos
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bun_ji_candidates = [(bun, ji)]
     if ji != "0":
@@ -578,9 +558,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # ============================================================
-    # ★ 1단계: 모든 combo 전체 수집 (break 없이)
-    # ============================================================
+    # 1단계: 모든 combo 전체 수집
     all_items = []
     for pg, bd, b, j in combos:
         area_list, err1, dbg1 = call_api_all_pages(
@@ -595,26 +573,20 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     if not all_items:
         return None, "전유부 데이터 자체 없음", all_errors, all_debug, None
 
-    # ============================================================
-    # ★ 2단계: 동 필터 (엄격 → 관대)
-    # ============================================================
-    # 엄격: dongNm이 명시되어 있고 매칭됨
+    # 2단계: 동 필터 (엄격 → 관대)
     strict_dong_items = [
         it for it in all_items
         if str(it.get("dongNm", "")).strip() and
            is_match(target_dong_s, it.get("dongNm"))
     ]
-    # 관대: dongNm 비었거나 층표기 → 같은 지번이므로 통과
     permissive_dong_items = [
         it for it in all_items
         if _dong_matches(target_dong_s, it.get("dongNm"))
     ]
 
-    # ============================================================
-    # ★ 3단계: 매칭 함수 (정확 → 층prefix 순)
-    # ============================================================
+    # 3단계: 매칭 (정확 → 층prefix)
     def _try_match(items, tier_name):
-        # 3-A: 정확매칭 (1202, 1202호, 제1202호)
+        # 3-A: 정확매칭
         for it in items:
             h = (it.get("hoNm") or "").strip()
             if not _is_exact_ho(h, target_ho_s):
@@ -627,7 +599,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             if val is not None:
                 return (val, f"{tier_name}-정확매칭(hoNm={h})", it)
 
-        # 3-B: 층prefix매칭 (12층1202, 12층 1202, 12F1202)
+        # 3-B: 층prefix
         for it in items:
             h = (it.get("hoNm") or "").strip()
             if not _is_floor_prefixed_ho(h, target_ho_s):
@@ -642,7 +614,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
         return None
 
-    # === 실행: 엄격한 동 → 관대한 동 ===
+    # 엄격동 → 관대동 순
     if strict_dong_items:
         result = _try_match(strict_dong_items, "엄격동")
         if result:
@@ -653,9 +625,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if result:
             return result[0], result[1], all_errors, all_debug, result[2]
 
-    # ============================================================
-    # ★ 4단계: 실패 - 진단 로그
-    # ============================================================
+    # 4단계: 실패 → 진단 로그
     all_dongs = sorted({(it.get("dongNm") or "").strip()
                         for it in all_items if (it.get("dongNm") or "").strip()})
     ho_samples_in_dong = sorted({(it.get("hoNm") or "").strip()
@@ -664,7 +634,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     all_ho_samples = sorted({(it.get("hoNm") or "").strip()
                              for it in all_items if (it.get("hoNm") or "").strip()})
 
-    # 정확/층prefix 후보는 있는데 area가 없는 경우 별도 표시
     exact_candidates = [it for it in permissive_dong_items
                         if _is_exact_ho(it.get("hoNm") or "", target_ho_s)]
     floor_candidates = [it for it in permissive_dong_items
@@ -697,10 +666,9 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         ],
     })
 
-    # 상태 메시지 상세
     msg_parts = [f"'{target_dong_s}동 {target_ho_s}호' 전유부 없음"]
     if exact_candidates or floor_candidates:
-        msg_parts.append(f"매칭 후보는 있으나 면적/전유 조건 불충족")
+        msg_parts.append(f"매칭 후보 있으나 면적/전유 조건 불충족")
         msg_parts.append(f"(exact={len(exact_candidates)}, floor={len(floor_candidates)})")
     else:
         if all_dongs:
@@ -1346,4 +1314,83 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기"
                                         f"📄 **괄호제거:** `{combine_address(c['도로명주소_깔끔'], detail_val)}`")
                         if c["건물명"]:
                             st.caption(f"🏢 건물명: {c['건물명']}")
-                        if c["지번주
+                        if c["지번주소"]:
+                            st.caption(f"📍 지번: {c['지번주소']}")
+                        btn_a, btn_b = st.columns(2)
+                        with btn_a:
+                            if st.button("📥 원본 주소 넣기", key=f"orig_{i}", use_container_width=True):
+                                st.session_state["_picker_open"] = {
+                                    "candidate": c, "detail_key": detail_key,
+                                    "base_key": "도로명주소", "next_slot": next_slot_1based,
+                                }
+                                st.rerun()
+                        with btn_b:
+                            if st.button("📥 괄호 제거 주소 넣기", key=f"clean_{i}", use_container_width=True):
+                                st.session_state["_picker_open"] = {
+                                    "candidate": c, "detail_key": detail_key,
+                                    "base_key": "도로명주소_깔끔", "next_slot": next_slot_1based,
+                                }
+                                st.rerun()
+            else:
+                st.info("🔽 검색 결과가 접혀 있습니다.")
+
+st.markdown("---")
+_flash = st.session_state.pop("_flash_msg", None)
+if _flash:
+    st.success(_flash)
+
+st.subheader("📋 전용면적 · 주택유형 조회")
+st.caption("💡 'OO동 OOOO호' 형식 권장. **탭을 닫아도 서버가 살아있으면 조회가 계속됩니다.**")
+
+addresses = []
+for i in range(st.session_state.address_count):
+    address = st.text_input(f"주소 {i + 1}", key=f"address_{i}",
+                            placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호")
+    addresses.append(address.strip())
+
+ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
+with ctrl_col1:
+    if st.button("➕ 주소 추가",
+                 disabled=(st.session_state.address_count >= MAX_ADDRESS),
+                 use_container_width=True, key="btn_add_addr"):
+        st.session_state.address_count += 1
+        st.rerun()
+with ctrl_col2:
+    if st.button("➖ 마지막 삭제",
+                 disabled=(st.session_state.address_count <= 1),
+                 use_container_width=True, key="btn_remove_addr"):
+        remove_idx = st.session_state.address_count - 1
+        st.session_state.pop(f"address_{remove_idx}", None)
+        st.session_state.address_count -= 1
+        st.rerun()
+with ctrl_col3:
+    do_query = st.button("🔎 조회 (백그라운드 실행)", type="primary",
+                         use_container_width=True, key="btn_query_top")
+
+st.caption(f"현재 입력칸: **{st.session_state.address_count} / {MAX_ADDRESS}** 개")
+st.markdown("---")
+
+if do_query:
+    targets = [x for x in addresses if x]
+    if not targets:
+        st.warning("주소를 하나 이상 입력해주세요.")
+        st.stop()
+    query_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    st.session_state["_current_query_id"] = query_id
+    thread = threading.Thread(
+        target=_background_query,
+        args=(query_id, targets, USER_ID),
+        daemon=True,
+    )
+    thread.start()
+    st.success(f"🚀 백그라운드 조회 시작! (ID: `{query_id}`)")
+    st.info("💡 탭을 닫아도 서버가 살아있으면 조회가 계속됩니다. 다시 접속하면 상단 **최근 조회 결과**에서 확인하세요.")
+    time.sleep(0.5)
+    st.rerun()
+
+render_query_status()
+
+_picker = st.session_state.pop("_picker_open", None)
+if _picker:
+    slot_picker_dialog(_picker["candidate"], _picker["detail_key"],
+                       _picker["base_key"], _picker["next_slot"])
