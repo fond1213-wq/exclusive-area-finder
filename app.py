@@ -98,19 +98,23 @@ def is_match(t, s):
     if t.isdigit() and s.isdigit(): return int(t) == int(s)
     return t.upper() == s.upper()
 
+# ★ 동 optional + 정확한 파싱 (역삼동 → "" 처리)
 def extract_dong_ho(a):
-    t = clean_addr(a); d = h = ""
-    m = re.search(r"([0-9A-Za-z]+)\s*동(?![가-힣])", t)
-    if m: d = m.group(1)
+    t = clean_addr(a)
+    d = h = ""
     m = re.search(r"(\d+)\s*호(?![가-힣])", t)
     if m: h = m.group(1)
-    if not d and not h:
-        m = re.search(r"(\d{2,4})-(\d{3,4})\b", t)
-        if m: d, h = m.group(1), m.group(2)
     if not h:
         tk = t.split()
-        if tk and tk[-1].isdigit() and len(tk[-1]) >= 3: h = tk[-1]
+        if tk and tk[-1].isdigit() and len(tk[-1]) >= 3:
+            h = tk[-1]
+    if not h:
+        m = re.search(r"\d{1,4}-\d{3,4}\b", t)
+        if m: h = m.group(0).split("-")[-1]
     if h: h = re.sub(r"[^\d]", "", str(h))
+    # 동: 공백/시작 뒤의 숫자/알파벳 + "동" (역삼동 같은 지명 제외)
+    m = re.search(r"(?:^|[\s(])(\d+|[A-Za-z])\s*동(?![가-힣])", t)
+    if m: d = m.group(1)
     return d, h
 
 def extract_road_pat(a):
@@ -147,8 +151,7 @@ def search_juso_single(kw):
         except ValueError: return [], "JSON 파싱 실패", d
         c = data.get("results", {}).get("common", {})
         if c.get("errorCode","") not in ("","0"): return [], f"오류 [{c.get('errorCode')}]", d
-        jl = data.get("results", {}).get("juso", [])
-        return jl, "정상", d
+        return data.get("results", {}).get("juso", []), "정상", d
     except requests.exceptions.RequestException as e:
         return [], f"요청 실패: {e}", d
 
@@ -197,15 +200,15 @@ def search_address_candidates(kw, cnt=20):
     return res, None
 
 # ============================================================
-# ★ 국토부 API - match_check 조기 종료 지원
+# ★ 국토부 API - totalCount=0 즉시 종료 + 빠른 재시도
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
     url = f"{BUILDING_API_BASE}/{endpoint}"
     all_items, page, error_msg = [], 1, None
     debug_snippets = []
-    ROWS = 100; MAXP = 100; MAXE = 5
-    ce = 0; plog = []; tot_r = 0; tp = None
+    ROWS = 100; MAXP = 60; MAXE = 3
+    ce = 0; tot_r = 0; tp = None
     while page <= MAXP:
         p = {"serviceKey": BUILDING_API_KEY_DECODED, "sigunguCd": sigunguCd, "bjdongCd": bjdongCd,
              "platGbCd": platGbCd, "bun": str(bun).zfill(4), "ji": str(ji).zfill(4),
@@ -213,57 +216,55 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
         if extra_params: p.update(extra_params)
         try:
             rt = ""
-            for at in range(4):
+            for at in range(3):
                 try:
-                    r = requests.get(url, params=p, timeout=25); rt = r.text or ""
+                    r = requests.get(url, params=p, timeout=20); rt = r.text or ""
                     if rt.strip(): break
                 except requests.exceptions.RequestException: rt = ""
-                if at < 3: time.sleep(2.0 * (at+1))
+                if at < 2: time.sleep(1.0)
             if not rt.strip():
-                error_msg = f"[{endpoint}] page {page} 빈응답"; ce += 1
-                plog.append({"page":page,"count":0,"reason":"empty"})
+                error_msg = f"[{endpoint}] p{page} 빈응답"; ce += 1
                 if ce >= MAXE: break
                 page += 1; continue
             try: data = r.json()
             except ValueError:
-                error_msg = f"[{endpoint}] page {page} JSON실패"; ce += 1
-                plog.append({"page":page,"count":0,"reason":"json"})
+                error_msg = f"[{endpoint}] p{page} JSON실패"; ce += 1
                 if ce >= MAXE: break
                 page += 1; continue
             h = data.get("response", {}).get("header", {})
             if h.get("resultCode","") not in ("00","0",""):
                 error_msg = f"[{endpoint}] API오류 [{h.get('resultCode')}]"; break
             b = data.get("response", {}).get("body", {})
+            tot_r = int(b.get("totalCount", 0) or 0)
+            # ★ totalCount=0 즉시 종료 (필터 미스 → 다음 필터로)
+            if tot_r == 0:
+                break
             it = b.get("items", {})
             if not it:
-                ce += 1; plog.append({"page":page,"count":0,"reason":"no_items"})
+                ce += 1
                 if ce >= MAXE: break
                 page += 1; continue
             il = it.get("item", [])
             if isinstance(il, dict): il = [il]
             if not il:
-                ce += 1; plog.append({"page":page,"count":0,"reason":"empty_list"})
+                ce += 1
                 if ce >= MAXE: break
                 page += 1; continue
             ce = 0
             all_items.extend(il)
-            tot_r = int(b.get("totalCount",0) or 0)
-            if tp is None and tot_r > 0: tp = (tot_r + ROWS - 1) // ROWS
-            plog.append({"page":page,"count":len(il),"total_so_far":len(all_items),"total_reported":tot_r})
+            if tp is None: tp = (tot_r + ROWS - 1) // ROWS
             if match_check is not None and not collect_all:
                 for x in il:
                     if match_check(x):
-                        debug_snippets.append({"early_match_page": page})
+                        debug_snippets.append({"early": page})
                         return all_items, error_msg, debug_snippets
-            if tp is not None and page >= tp: break
-            page += 1; time.sleep(0.3)
+            if len(all_items) >= tot_r: break
+            if page >= tp: break
+            page += 1
         except requests.exceptions.RequestException as e:
-            error_msg = f"[{endpoint}] page {page} 요청실패: {e}"; ce += 1
-            plog.append({"page":page,"count":0,"reason":"exc"})
+            error_msg = f"[{endpoint}] p{page} 실패: {e}"; ce += 1
             if ce >= MAXE: break
-            page += 1; time.sleep(1.0)
-    debug_snippets.append({"endpoint":endpoint,"pages_attempted":page-1,"total_collected":len(all_items),
-                           "total_reported":tot_r,"total_pages_needed":tp,"page_log":plog})
+            page += 1
     return all_items, error_msg, debug_snippets
 
 # ============================================================
@@ -313,7 +314,8 @@ def _is_excl(item):
 
 def _dong_match(td, id_):
     t = str(td or "").strip(); d = str(id_ or "").strip()
-    if not t or not d: return True
+    if not t: return True
+    if not d: return True
     if is_match(t,d): return True
     if re.match(r"^\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)$", d): return True
     return False
@@ -334,18 +336,18 @@ def _ho_match(ht, th):
     return False
 
 # ============================================================
-# ★ find_dedicated_area - 조기 종료 최적화
+# ★ find_dedicated_area - 동 optional + 필터 우선 + 층prefix 확장
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
         return None, "호수 미인식", [], [], None
-    if not target_dong:
-        return None, "동 미입력", [], [], None
+    # ★ 동 optional (한동짜리 건물 허용)
 
     eb = expected_bldNm or []
     errs, dbgs = [], []
-    ths = str(target_ho).strip(); tds = str(target_dong).strip()
+    tds = str(target_dong).strip() if target_dong else ""
+    ths = re.sub(r"[^\d]", "", str(target_ho).strip())
 
     def _bld_ok(it):
         if not eb: return True
@@ -356,18 +358,16 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             if en and (en == ib or en in ib or ib in en): return True
         return False
 
-    def _match_item(it, relaxed=False):
+    def _match_it(it):
         h = (it.get("hoNm") or "").strip()
         if not _ho_match(h, ths): return None
         d = (it.get("dongNm") or "").strip()
-        if not relaxed:
-            if not d or not is_match(tds, d): return None
-        else:
-            if d and not _dong_match(tds, d): return None
+        if tds and d and not _dong_match(tds, d): return None
         if not _is_excl(it): return None
         if not _bld_ok(it): return None
         return _safe_area(it)
 
+    # combos
     bdv = _bjdong_vars(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bjc = [(bun, ji)]
     if ji != "0": bjc.append((bun, "0"))
@@ -376,99 +376,48 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         k = (str(b), str(j))
         if k not in sb: sb.add(k); bju.append((b, j))
     pcs = [platGbCd] + [x for x in ("0","1","2") if x != platGbCd]
-
     combos = []
-    def _add(pg, bd, b, j):
-        k = (str(pg), str(bd), str(b), str(j))
-        if k not in combos: combos.append(k)
     for bd in bdv:
-        for b, j in bju: _add(platGbCd, bd, b, j)
+        for b, j in bju: combos.append((platGbCd, bd, b, j))
     for pg in pcs:
         if pg == platGbCd: continue
         for bd in bdv:
-            for b, j in bju: _add(pg, bd, b, j)
+            for b, j in bju: combos.append((pg, bd, b, j))
 
-    # ★ 조기 종료 검색
-    def _fast(flt, rel):
-        for combo in combos:
-            pg, bd, b, j = combo
+    # ★ 필터 시도 (빠른 것 우선, 층prefix 확장)
+    attempts = []
+    if tds:
+        attempts.append(({"dongNm": tds, "hoNm": ths}, f"동+호({tds},{ths})"))
+    if len(ths) >= 3:
+        floor = str(int(ths) // 100)
+        for suf in ("", "호"):
+            fpx = f"{floor}층{ths}{suf}"
+            if tds:
+                attempts.append(({"dongNm": tds, "hoNm": fpx}, f"동+층({fpx})"))
+            attempts.append(({"hoNm": fpx}, f"층({fpx})"))
+    attempts.append(({"hoNm": ths}, f"호({ths})"))
+    attempts.append(({"hoNm": f"{ths}호"}, f"호호"))
+    if tds:
+        attempts.append(({"dongNm": tds}, f"동만({tds})"))
+    attempts.append((None, "전체"))
+
+    for flt, label in attempts:
+        for pg, bd, b, j in combos:
             matched = [None]
             def _mc(it):
-                v = _match_item(it, rel)
+                v = _match_it(it)
                 if v is not None:
-                    matched[0] = (v, it)
-                    return True
+                    matched[0] = (v, it); return True
                 return False
             items, er, dg = call_api_all_pages(
                 "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
                 extra_params=flt, match_check=_mc, collect_all=False)
             dbgs.extend(dg)
             if er: errs.append(er)
-            if matched[0]: return matched[0]
-        return None
+            if matched[0]:
+                return matched[0][0], f"{label}-매칭", errs, dbgs, matched[0][1]
 
-    fast_attempts = [
-        ({"dongNm": f"{tds}동", "hoNm": ths}, False, "동+호필터(엄격)"),
-        ({"dongNm": f"{tds}동", "hoNm": f"{ths}호"}, False, "동+호필터(호)(엄격)"),
-        ({"hoNm": ths}, False, "호필터(엄격)"),
-        ({"hoNm": f"{ths}호"}, False, "호필터(호)(엄격)"),
-        ({"dongNm": f"{tds}동"}, False, "동필터(엄격)"),
-        ({"dongNm": f"{tds}동"}, True, "동필터(관대)"),
-        (None, False, "전체스캔(엄격)"),
-        (None, True, "전체스캔(관대)"),
-    ]
-    for flt, rel, label in fast_attempts:
-        m = _fast(flt, rel)
-        if m:
-            return m[0], f"{label}-조기매칭", errs, dbgs, m[1]
-
-    # 진단용 (첫 combo만 전체 스캔)
-    all_items = []
-    if combos:
-        pg, bd, b, j = combos[0]
-        items, er, dg = call_api_all_pages(
-            "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j, collect_all=True)
-        all_items.extend(items); dbgs.extend(dg)
-        if er: errs.append(er)
-
-    if not all_items:
-        return None, "전유부 데이터 자체 없음", errs, dbgs, None
-
-    tdig = re.sub(r"[^\d]","",_norm_dig(ths))
-    try: tint = int(tdig)
-    except ValueError: tint = None
-
-    def _contains(h):
-        if tint is None: return False
-        for n in _extract_nums(h):
-            try:
-                if int(n) == tint: return True
-            except ValueError: pass
-        return False
-
-    strict = [x for x in all_items if str(x.get("dongNm","")).strip() and is_match(tds, x.get("dongNm"))]
-    sh = [x for x in strict if _contains(x.get("hoNm",""))]
-    ah = [x for x in all_items if _contains(x.get("hoNm",""))]
-    tot_r = 0
-    for d in dbgs:
-        if isinstance(d, dict) and "total_reported" in d: tot_r = max(tot_r, d["total_reported"])
-    msg = f"[{tds}동 {ths}호] 수집 {len(all_items)}/{tot_r}건"
-    if sh:
-        c = sh[0]; rs = []
-        if not _is_excl(c): rs.append("공용")
-        if not _bld_ok(c): rs.append("건물명")
-        if _safe_area(c) is None: rs.append(f"면적없음(area={c.get('area')})")
-        msg += f" | hoNm='{c.get('hoNm')}' 있음"
-        if rs: msg += f" / 실패: {','.join(rs)}"
-    elif ah:
-        oth = [x for x in ah if not is_match(tds, x.get("dongNm"))]
-        if oth:
-            ds = sorted({(x.get("dongNm") or "").strip() for x in oth if (x.get("dongNm") or "").strip()})
-            msg += f" | ⚠️ 다른동에만: {ds[:5]}"
-    else:
-        ad = sorted({(x.get("dongNm") or "").strip() for x in all_items if (x.get("dongNm") or "").strip()})
-        msg += f" | 전체에 없음 | 동: {ad[:10]}"
-    return None, msg, errs, dbgs, None
+    return None, f"[{tds or '-'}동 {ths}호] 매칭 실패 (시도: {len(attempts)}개 필터)", errs, dbgs, None
 
 # ============================================================
 # 총괄표제부 / 인허가 / 표제부
@@ -809,11 +758,11 @@ _flash = st.session_state.pop("_flash_msg", None)
 if _flash: st.success(_flash)
 
 st.subheader("📋 전용면적 · 주택유형 조회")
-st.caption("💡 'OO동 OOOO호' 형식 권장. 탭 닫아도 서버 살아있으면 계속.")
+st.caption("💡 'OO동 OOOO호' 형식 권장 (동 없이 'OOO호'도 가능). 탭 닫아도 서버 살아있으면 계속.")
 
 addrs = []
 for i in range(st.session_state.address_count):
-    a = st.text_input(f"주소 {i+1}", key=f"address_{i}", placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호")
+    a = st.text_input(f"주소 {i+1}", key=f"address_{i}", placeholder="예: 서울특별시 성동구 왕십리로 410 센트라스 113동 401호 / 401호")
     addrs.append(a.strip())
 
 c1, c2, c3 = st.columns([1,1,2])
