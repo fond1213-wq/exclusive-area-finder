@@ -300,19 +300,22 @@ def search_address_candidates(keyword, count=20):
     return results, None
 
 # ============================================================
-# 국토부 API 호출 (★ 페이지네이션 버그 수정)
+# 국토부 API 호출 (★ numOfRows=100 + 빈응답 3회까지 계속)
 # ============================================================
 def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                        match_check=None, extra_params=None, collect_all=False):
     url = f"{BUILDING_API_BASE}/{endpoint}"
-    all_items, page, error_msg, debug_snippets = [], 1, None, []
-    ROWS_PER_PAGE = 1000
+    all_items, page, error_msg = [], 1, None
+    debug_snippets = []
+    ROWS_PER_PAGE = 100
     MAX_PAGES = 100
-    total_pages_needed = None
+    MAX_CONSECUTIVE_EMPTY = 3
+    consecutive_empty = 0
     total_count_reported = 0
-    page_size_actual = 0
+    page_log = []
+    seen_keys = set()
 
-    while True:
+    while page <= MAX_PAGES:
         params = {"serviceKey": BUILDING_API_KEY_DECODED,
                   "sigunguCd": sigunguCd, "bjdongCd": bjdongCd,
                   "platGbCd": platGbCd, "bun": str(bun).zfill(4), "ji": str(ji).zfill(4),
@@ -331,64 +334,114 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                     raw_text = ""
                 if attempt < 3:
                     time.sleep(2.0 * (attempt + 1))
+
             if not raw_text.strip():
-                error_msg = f"[{endpoint}] 빈 응답 4회"
-                break
+                error_msg = f"[{endpoint}] page {page} 빈 응답 4회"
+                consecutive_empty += 1
+                page_log.append({"page": page, "count": 0, "reason": "empty_after_4"})
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                    break
+                page += 1
+                time.sleep(0.5)
+                continue
+
             try:
                 data = res.json()
             except ValueError:
-                error_msg = f"[{endpoint}] JSON 파싱 실패"
-                break
+                error_msg = f"[{endpoint}] page {page} JSON 파싱 실패"
+                consecutive_empty += 1
+                page_log.append({"page": page, "count": 0, "reason": "json_fail"})
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                    break
+                page += 1
+                time.sleep(0.5)
+                continue
+
             header = data.get("response", {}).get("header", {})
             if header.get("resultCode", "") not in ("00", "0", ""):
-                error_msg = f"[{endpoint}] API 오류 [{header.get('resultCode')}]"
+                error_msg = f"[{endpoint}] page {page} API 오류 [{header.get('resultCode')}]"
                 break
+
             body = data.get("response", {}).get("body", {})
             items = body.get("items", {})
             if not items:
-                break
+                consecutive_empty += 1
+                page_log.append({"page": page, "count": 0, "reason": "no_items"})
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                    break
+                page += 1
+                time.sleep(0.5)
+                continue
+
             item_list = items.get("item", [])
             if isinstance(item_list, dict):
                 item_list = [item_list]
             if not item_list:
-                break
+                consecutive_empty += 1
+                page_log.append({"page": page, "count": 0, "reason": "empty_list"})
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                    break
+                page += 1
+                time.sleep(0.5)
+                continue
 
-            if page == 1:
-                page_size_actual = len(item_list)
+            consecutive_empty = 0
 
-            all_items.extend(item_list)
+            new_items = []
+            for it in item_list:
+                key = (
+                    str(it.get("mgmPmsrgstPk", "")),
+                    str(it.get("dongNm", "")),
+                    str(it.get("hoNm", "")),
+                    str(it.get("exposPubuseGbCd", "")),
+                )
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    new_items.append(it)
+
+            all_items.extend(new_items)
             total_count_reported = int(body.get("totalCount", 0) or 0)
 
-            if total_pages_needed is None:
-                effective_page_size = max(page_size_actual, 1)
-                total_pages_needed = max(1, -(-total_count_reported // effective_page_size))
-                if page == 1:
-                    debug_snippets.append({
-                        "endpoint": endpoint,
-                        "totalCount": total_count_reported,
-                        "page_size_actual": page_size_actual,
-                        "total_pages_needed": total_pages_needed,
-                    })
+            page_log.append({
+                "page": page,
+                "count": len(item_list),
+                "new": len(new_items),
+                "total_so_far": len(all_items),
+                "total_reported": total_count_reported,
+            })
 
             if match_check is not None and not collect_all:
                 for it in item_list:
                     if match_check(it):
+                        debug_snippets.append({"endpoint": endpoint, "early_match_page": page})
                         return all_items, error_msg, debug_snippets
 
-            if len(all_items) >= total_count_reported:
+            if total_count_reported > 0 and len(all_items) >= total_count_reported:
                 break
-            if page >= min(total_pages_needed, MAX_PAGES):
-                break
+
             page += 1
             time.sleep(0.3)
-        except requests.exceptions.RequestException as e:
-            error_msg = f"[{endpoint}] 요청 실패: {e}"
-            break
 
+        except requests.exceptions.RequestException as e:
+            error_msg = f"[{endpoint}] page {page} 요청 실패: {e}"
+            consecutive_empty += 1
+            page_log.append({"page": page, "count": 0, "reason": f"exc: {str(e)[:60]}"})
+            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                break
+            page += 1
+            time.sleep(1.0)
+
+    debug_snippets.append({
+        "endpoint": endpoint,
+        "pages_attempted": page - 1,
+        "total_collected": len(all_items),
+        "total_reported": total_count_reported,
+        "page_log": page_log,
+    })
     if total_count_reported > len(all_items):
         debug_snippets.append({
             "endpoint": endpoint,
-            "warning": f"수집 미완료: totalCount={total_count_reported}, collected={len(all_items)}",
+            "warning": f"수집 미완료: {len(all_items)}/{total_count_reported}",
         })
     return all_items, error_msg, debug_snippets
 
@@ -502,7 +555,7 @@ def _is_ho_match(ho_text, target_ho):
 
 
 # ============================================================
-# find_dedicated_area (강화된 진단)
+# find_dedicated_area (진단 로그 강화)
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
@@ -630,8 +683,8 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
 
     total_reported = 0
     for d in all_debug:
-        if isinstance(d, dict) and "totalCount" in d:
-            total_reported = max(total_reported, d["totalCount"])
+        if isinstance(d, dict) and "total_reported" in d:
+            total_reported = max(total_reported, d["total_reported"])
     collect_info = f"수집 {len(all_items)}/{total_reported}건" if total_reported else f"수집 {len(all_items)}건"
 
     msg = f"[{target_dong_s}동 {target_ho_s}호] {collect_info}"
