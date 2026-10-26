@@ -168,6 +168,8 @@ def extract_dong_ho(address):
         toks = text.split()
         if toks and toks[-1].isdigit() and len(toks[-1]) >= 3:
             ho = toks[-1]
+    if ho:
+        ho = re.sub(r"[^\d]", "", str(ho))
     return dong, ho
 
 def extract_road_pattern(address):
@@ -385,9 +387,25 @@ def _bjdong_variants(bjdongCd, alt=None):
     return variants
 
 
+def _normalize_digits(s):
+    """전각 숫자/문자 → 반각, 특수공백 제거"""
+    if s is None:
+        return ""
+    s = str(s)
+    s = s.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+    s = re.sub(r"[\s\u00A0\u3000\u200B\u200C\u200D\uFEFF]+", "", s)
+    return s
+
+
+def _extract_numbers(s):
+    s = _normalize_digits(s)
+    return re.findall(r"\d+", s)
+
+
 def _safe_area(item):
     fields = ("area", "exposArea", "전유면적", "exposPubuseArea",
-              "areaVal", "exclusiveArea", "전유면적(㎡)", "areaExposPubuse")
+              "areaVal", "exclusiveArea", "전유면적(㎡)", "areaExposPubuse",
+              "전유면적값", "면적", "전유면적(제곱미터)")
     for field in fields:
         raw = item.get(field)
         if raw is None or raw == "":
@@ -397,7 +415,7 @@ def _safe_area(item):
             if not cleaned:
                 continue
             v = float(cleaned)
-            if 1.0 <= v <= 2000.0:
+            if 1.0 <= v <= 5000.0:
                 return round(v, 2)
         except (ValueError, TypeError):
             continue
@@ -407,24 +425,22 @@ def _safe_area(item):
 def _is_exclusive(item):
     cd = str(item.get("exposPubuseGbCd", "")).strip()
     nm = str(item.get("exposPubuseGbCdNm", "")).strip()
+    if nm and "공용" in nm:
+        return False
+    if nm and "전유" in nm:
+        return True
     if cd in ("1", "01", "001"):
         return True
     if cd in ("2", "02", "002"):
         return False
-    if nm:
-        if "공용" in nm:
-            return False
-        if "전유" in nm:
-            return True
     h = str(item.get("hoNm", "")).strip()
-    if h and re.search(r"\d{2,}", h) and not re.search(
+    if h and re.search(r"\d+", h) and not re.search(
             r"주차|기계|계단|홀|화장실|창고|관리|경비|지하|옥탑|부속", h):
         return True
     return False
 
 
 def _dong_matches(target_dong, item_dong):
-    """동 처리 - 기존 그대로"""
     t = str(target_dong or "").strip()
     d = str(item_dong or "").strip()
     if not t or not d:
@@ -436,71 +452,46 @@ def _dong_matches(target_dong, item_dong):
     return False
 
 
-# ★★★ 정확매칭: 1202, 1202호, 제1202호 등 ★★★
-def _is_exact_ho(ho_text, target_ho):
+def _is_ho_match(ho_text, target_ho):
+    """
+    hoNm에 target이 매칭되는지 - 숫자 기반 관대 매칭
+      1) 정확 일치: "1206", "1206호", "제1206호"
+      2) 숫자 추출 후 target 포함: "12층1206호" → [12, 1206] → 1206 매칭
+    """
     h = str(ho_text or "").strip()
     t = str(target_ho or "").strip()
     if not h or not t:
         return False
-    h_compact = re.sub(r"\s+", "", h)
-    t_compact = re.sub(r"\s+", "", t)
-    variants = [
-        t_compact,
-        f"{t_compact}호",
-        f"제{t_compact}호",
-        f"제{t_compact}",
-        f"{t_compact}호실",
-    ]
-    return h_compact in variants
 
-
-# ★★★ 층prefix: 1202 → 12층1202, 12층 1202호 등 ★★★
-def _is_floor_prefixed_ho(ho_text, target_ho):
-    h = str(ho_text or "").strip()
-    t = str(target_ho or "").strip()
-    if not h or not t or not t.isdigit():
+    h_norm = _normalize_digits(h)
+    t_digits = re.sub(r"[^\d]", "", _normalize_digits(t))
+    if not t_digits:
         return False
 
-    h_compact = re.sub(r"\s+", "", h)
+    try:
+        t_int = int(t_digits)
+    except ValueError:
+        return False
 
-    # 앞 1~3자리로 층 유도
-    max_prefix = min(3, len(t))
-    for plen in range(1, max_prefix + 1):
-        floor = t[:plen]
+    # 1) 정확 일치 variants
+    t_variants = {t_digits, f"{t_digits}호", f"제{t_digits}", f"제{t_digits}호"}
+    if h_norm in t_variants:
+        return True
+
+    # 2) 숫자 추출 후 target 존재 여부
+    nums = re.findall(r"\d+", h_norm)
+    for n in nums:
         try:
-            ho_int = int(t)
+            if int(n) == t_int:
+                return True
         except ValueError:
-            ho_int = t
-        patterns = [
-            f"{floor}층{t}",
-            f"{floor}층{t}호",
-            f"{floor}층{ho_int}",
-            f"{floor}층{ho_int}호",
-            f"{floor}F{t}",
-            f"{floor}f{t}",
-            f"{floor}층-{t}",
-        ]
-        if h_compact in patterns:
-            return True
-
-    # 폴백: 층 표기 제거 후 target만 남는지
-    cleaned = h_compact
-    for _ in range(3):
-        cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", cleaned)
-        cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", cleaned)
-    cleaned_nums = re.sub(r"[^\d]", "", cleaned)
-    if cleaned_nums == t:
-        # 다른 큰 숫자(3자리 이상)가 있으면 오탐 방지
-        other_nums = [n for n in re.findall(r"\d+", h_compact)
-                      if n != t and len(n) >= 3]
-        if not other_nums:
-            return True
+            continue
 
     return False
 
 
 # ============================================================
-# ★★★ find_dedicated_area - 동 유지 + 정확→층prefix 재검색 ★★★
+# find_dedicated_area
 # ============================================================
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
@@ -528,7 +519,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 return True
         return False
 
-    # combos
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bun_ji_candidates = [(bun, ji)]
     if ji != "0":
@@ -558,7 +548,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # 1단계: 모든 combo 전체 수집
+    # 1단계: 전체 수집
     all_items = []
     for pg, bd, b, j in combos:
         area_list, err1, dbg1 = call_api_all_pages(
@@ -573,7 +563,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     if not all_items:
         return None, "전유부 데이터 자체 없음", all_errors, all_debug, None
 
-    # 2단계: 동 필터 (엄격 → 관대)
+    # 2단계: 동 필터
     strict_dong_items = [
         it for it in all_items
         if str(it.get("dongNm", "")).strip() and
@@ -584,12 +574,11 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if _dong_matches(target_dong_s, it.get("dongNm"))
     ]
 
-    # 3단계: 매칭 (정확 → 층prefix)
+    # 3단계: 매칭
     def _try_match(items, tier_name):
-        # 3-A: 정확매칭
         for it in items:
             h = (it.get("hoNm") or "").strip()
-            if not _is_exact_ho(h, target_ho_s):
+            if not _is_ho_match(h, target_ho_s):
                 continue
             if not _is_exclusive(it):
                 continue
@@ -597,24 +586,9 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                 continue
             val = _safe_area(it)
             if val is not None:
-                return (val, f"{tier_name}-정확매칭(hoNm={h})", it)
-
-        # 3-B: 층prefix
-        for it in items:
-            h = (it.get("hoNm") or "").strip()
-            if not _is_floor_prefixed_ho(h, target_ho_s):
-                continue
-            if not _is_exclusive(it):
-                continue
-            if not _bldnm_ok(it):
-                continue
-            val = _safe_area(it)
-            if val is not None:
-                return (val, f"{tier_name}-층prefix(hoNm={h})", it)
-
+                return (val, f"{tier_name}-매칭(hoNm={h})", it)
         return None
 
-    # 엄격동 → 관대동 순
     if strict_dong_items:
         result = _try_match(strict_dong_items, "엄격동")
         if result:
@@ -625,7 +599,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if result:
             return result[0], result[1], all_errors, all_debug, result[2]
 
-    # 4단계: 실패 → 진단 로그
+    # 4단계: 실패 - 상세 로그
     all_dongs = sorted({(it.get("dongNm") or "").strip()
                         for it in all_items if (it.get("dongNm") or "").strip()})
     ho_samples_in_dong = sorted({(it.get("hoNm") or "").strip()
@@ -633,43 +607,54 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                                  if (it.get("hoNm") or "").strip()})
     all_ho_samples = sorted({(it.get("hoNm") or "").strip()
                              for it in all_items if (it.get("hoNm") or "").strip()})
-
-    exact_candidates = [it for it in permissive_dong_items
-                        if _is_exact_ho(it.get("hoNm") or "", target_ho_s)]
-    floor_candidates = [it for it in permissive_dong_items
-                        if _is_floor_prefixed_ho(it.get("hoNm") or "", target_ho_s)]
+    ho_candidates = [it for it in permissive_dong_items
+                     if _is_ho_match(it.get("hoNm") or "", target_ho_s)]
 
     all_debug.append({
         "endpoint": "match_log",
         "target": f"{target_dong_s}동 {target_ho_s}호",
+        "target_ho_digits": target_ho_s,
         "total_items": len(all_items),
         "strict_dong_items": len(strict_dong_items),
         "permissive_dong_items": len(permissive_dong_items),
-        "exact_candidates": len(exact_candidates),
-        "floor_candidates": len(floor_candidates),
+        "ho_candidates_count": len(ho_candidates),
         "all_dongs": all_dongs[:20],
         "ho_samples_in_dong": ho_samples_in_dong[:30],
         "all_ho_samples": all_ho_samples[:30],
-        "exact_sample_details": [
-            {"hoNm": it.get("hoNm"), "area": it.get("area"),
-             "exposArea": it.get("exposArea"),
-             "safe_area": _safe_area(it), "is_excl": _is_exclusive(it),
-             "bldNm": it.get("bldNm"), "dongNm": it.get("dongNm")}
-            for it in exact_candidates[:10]
-        ],
-        "floor_sample_details": [
-            {"hoNm": it.get("hoNm"), "area": it.get("area"),
-             "exposArea": it.get("exposArea"),
-             "safe_area": _safe_area(it), "is_excl": _is_exclusive(it),
-             "bldNm": it.get("bldNm"), "dongNm": it.get("dongNm")}
-            for it in floor_candidates[:10]
+        "ho_candidate_details": [
+            {
+                "hoNm": (it.get("hoNm") or "").strip(),
+                "hoNm_numbers": _extract_numbers(it.get("hoNm") or ""),
+                "dongNm": (it.get("dongNm") or "").strip(),
+                "bldNm": (it.get("bldNm") or "").strip(),
+                "area_raw": it.get("area"),
+                "exposArea_raw": it.get("exposArea"),
+                "safe_area": _safe_area(it),
+                "is_exclusive": _is_exclusive(it),
+                "bldnm_ok": _bldnm_ok(it),
+                "dong_match_strict": is_match(target_dong_s, it.get("dongNm")),
+                "dong_match_permissive": _dong_matches(target_dong_s, it.get("dongNm")),
+            }
+            for it in ho_candidates[:20]
         ],
     })
 
     msg_parts = [f"'{target_dong_s}동 {target_ho_s}호' 전유부 없음"]
-    if exact_candidates or floor_candidates:
-        msg_parts.append(f"매칭 후보 있으나 면적/전유 조건 불충족")
-        msg_parts.append(f"(exact={len(exact_candidates)}, floor={len(floor_candidates)})")
+    if ho_candidates:
+        c = ho_candidates[0]
+        details = []
+        if _safe_area(c) is None:
+            details.append(f"면적없음(area={c.get('area')}, exposArea={c.get('exposArea')})")
+        if not _is_exclusive(c):
+            details.append(f"공용판정(cd={c.get('exposPubuseGbCd')}, nm={c.get('exposPubuseGbCdNm')})")
+        if not _bldnm_ok(c):
+            details.append(f"건물명불일치(bldNm={c.get('bldNm')})")
+        if not _dong_matches(target_dong_s, c.get("dongNm")):
+            details.append(f"동불일치(dongNm={c.get('dongNm')})")
+        if details:
+            msg_parts.append(f"hoNm='{c.get('hoNm')}' 후보 있음, 사유: {' / '.join(details)}")
+        else:
+            msg_parts.append(f"hoNm='{c.get('hoNm')}' 후보 있으나 알수없는 사유")
     else:
         if all_dongs:
             msg_parts.append(f"데이터의 동: {all_dongs[:5]}")
@@ -1350,14 +1335,12 @@ for i in range(st.session_state.address_count):
 
 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
 with ctrl_col1:
-    if st.button("➕ 주소 추가",
-                 disabled=(st.session_state.address_count >= MAX_ADDRESS),
+    if st.button("➕ 주소 추가", disabled=(st.session_state.address_count >= MAX_ADDRESS),
                  use_container_width=True, key="btn_add_addr"):
         st.session_state.address_count += 1
         st.rerun()
 with ctrl_col2:
-    if st.button("➖ 마지막 삭제",
-                 disabled=(st.session_state.address_count <= 1),
+    if st.button("➖ 마지막 삭제", disabled=(st.session_state.address_count <= 1),
                  use_container_width=True, key="btn_remove_addr"):
         remove_idx = st.session_state.address_count - 1
         st.session_state.pop(f"address_{remove_idx}", None)
@@ -1377,14 +1360,11 @@ if do_query:
         st.stop()
     query_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     st.session_state["_current_query_id"] = query_id
-    thread = threading.Thread(
-        target=_background_query,
-        args=(query_id, targets, USER_ID),
-        daemon=True,
-    )
+    thread = threading.Thread(target=_background_query,
+                              args=(query_id, targets, USER_ID), daemon=True)
     thread.start()
     st.success(f"🚀 백그라운드 조회 시작! (ID: `{query_id}`)")
-    st.info("💡 탭을 닫아도 서버가 살아있으면 조회가 계속됩니다. 다시 접속하면 상단 **최근 조회 결과**에서 확인하세요.")
+    st.info("💡 탭을 닫아도 서버가 살아있으면 조회가 계속됩니다.")
     time.sleep(0.5)
     st.rerun()
 
