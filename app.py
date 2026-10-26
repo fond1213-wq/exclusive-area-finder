@@ -27,7 +27,7 @@ QUERY_DIR = "query_results"
 os.makedirs(QUERY_DIR, exist_ok=True)
 
 APT_KW = ("자이","푸르지오","래미안","힐스테이트","아이파크","e편한세상","편한세상","더샵","롯데캐슬","SK뷰","한신더휴","한신","금호어울림","코오롱하늘채","호반베르디움","반도유보라","부영사랑으로","중흥S클래스","제일풍경채","대방노블랜드","우미린","벽산블루밍","동원로얄듀크","KCC스위첸","한화포레나","포레나","두산위브","현대홈타운","아파트","APT","포레온","올림픽파크","센트라스","파크")
-VILLA_KW = ("빌라","타운하우스","빌","홈타운")
+VILLA_KW = ("빌라","타운하우스","빌리지","빌","홈타운","맨션")
 
 # ============================================================
 # 슬롯 유틸
@@ -236,9 +236,7 @@ def call_api_all_pages(endpoint, sigunguCd, bjdongCd, platGbCd, bun, ji,
                 error_msg = f"[{endpoint}] API오류 [{h.get('resultCode')}]"; break
             b = data.get("response", {}).get("body", {})
             tot_r = int(b.get("totalCount", 0) or 0)
-            # ★ totalCount=0 즉시 종료 (필터 미스 → 다음 필터로)
-            if tot_r == 0:
-                break
+            if tot_r == 0: break
             it = b.get("items", {})
             if not it:
                 ce += 1
@@ -342,7 +340,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
         return None, "호수 미인식", [], [], None
-    # ★ 동 optional (한동짜리 건물 허용)
 
     eb = expected_bldNm or []
     errs, dbgs = [], []
@@ -367,7 +364,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if not _bld_ok(it): return None
         return _safe_area(it)
 
-    # combos
     bdv = _bjdong_vars(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
     bjc = [(bun, ji)]
     if ji != "0": bjc.append((bun, "0"))
@@ -384,7 +380,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         for bd in bdv:
             for b, j in bju: combos.append((pg, bd, b, j))
 
-    # ★ 필터 시도 (빠른 것 우선, 층prefix 확장)
     attempts = []
     if tds:
         attempts.append(({"dongNm": tds, "hoNm": ths}, f"동+호({tds},{ths})"))
@@ -505,9 +500,11 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None, targe
                 if not cur or str(cur).strip() in ("0","0.0","0.00"): info[k] = v
     return info, None, dg
 
+# ★★★ 02000 공동주택 세분화 + 빌라/빌리지 재분류 ★★★
 def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="", hhld="", grnd_flr="", plat_area="", arch_area="", ho_cnt="", tot_area=""):
     c = str(purps_cd or "").strip(); c = c.zfill(5) if c.isdigit() else c
     n = str(purps_nm or "").strip(); e = str(etc_purps or "").strip(); b = str(bld_nm or "").strip()
+
     if "도시형생활주택" in n or "도시형생활주택" in e or "도시형생활주택" in b: return "도시형생활주택"
     if c == "02001": return "아파트"
     if c == "02002": return "연립주택"
@@ -525,11 +522,36 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="", hhl
     if "다가구" in n: return "단독(다가구)주택"
     if "단독" in n: return "단독주택"
     if "오피스텔" in n: return "오피스텔(업무시설)"
+
     if c.startswith("02000") or "공동주택" in n or "공동주택" in e:
-        ha = any(k in b for k in APT_KW); hv = any(k in b for k in VILLA_KW)
+        ha = any(k in b for k in APT_KW)
+        hv = any(k in b for k in VILLA_KW)
+
+        # 1) 아파트 브랜드 명확
         if ha and not hv: return "아파트"
-        if hv and not ha: return "다세대주택" if any(k in b for k in ("빌라","빌")) else "연립주택"
+
+        # 2) 빌라/타운하우스/빌리지 명확 → 층수·세대수·면적으로 세분화
+        if hv and not ha:
+            try: flr = int(grnd_flr) if grnd_flr else None
+            except (ValueError, TypeError): flr = None
+            try: hh_n = int(hhld) if hhld else 0
+            except (ValueError, TypeError): hh_n = 0
+            try:
+                area_ref = float(arch_area) if arch_area else (float(plat_area) if plat_area else None)
+            except (ValueError, TypeError): area_ref = None
+
+            # 빌라 이름이어도 5층 이상 + 세대수 30 이상이면 아파트로 승격
+            if flr is not None and flr >= 5 and hh_n >= 30:
+                return "아파트"
+            # 4층 이하 + 면적 660㎡ 초과 → 연립
+            if flr is not None and flr <= 4 and area_ref is not None and area_ref > 660:
+                return "연립주택"
+            # 그 외 → 다세대
+            return "다세대주택"
+
+        # 3) 정보 부족 → 공동주택 (추후 process에서 재분류)
         return "공동주택"
+
     if "아파트" in e: return "아파트"
     if "다세대" in e: return "다세대주택"
     if "연립" in e: return "연립주택"
@@ -580,14 +602,45 @@ def process_address(address, progress=None):
             if pl and str(pl).strip() not in ("0","0.0","0.00"): ps = f"{float(str(pl).replace(',','')):.2f}㎡"
         except (ValueError, TypeError): pass
         return {"주소":address,"전용면적":ts,"대지면적":ps,"주택유형":tft,"유형출처":"표제부기반","상태":"단독주택 연면적 반환"}, {}
+
     area, status, errs, ad, mu = find_dedicated_area(juso["sigunguCd"], juso["bjdongCd"], juso["bun"], juso["ji"], juso["platGbCd"], td, th, juso=juso, expected_bldNm=eb)
+
     tfu = ""
     if mu:
-        unm = str(mu.get("mainPurpsCdNm","") or "").strip(); ucd = str(mu.get("mainPurpsCd","") or "").strip()
+        unm = str(mu.get("mainPurpsCdNm","") or "").strip()
+        ucd = str(mu.get("mainPurpsCd","") or "").strip()
         if unm or ucd:
             bnu = mu.get("bldNm","") or (ti.get("건물명","") if ti else "") or (pi.get("건물명","") if pi else "") or (juso.get("bdNm","") if juso else "")
-            tfu = classify_housing_type(purps_cd=ucd, purps_nm=unm, bld_nm=bnu, hhld=ti.get("세대수","") if ti else "", grnd_flr=ti.get("지상층수","") if ti else "")
+            tfu = classify_housing_type(
+                purps_cd=ucd, purps_nm=unm, bld_nm=bnu,
+                hhld=ti.get("세대수","") if ti else "",
+                grnd_flr=ti.get("지상층수","") if ti else "",
+                plat_area=ti.get("대지면적","") if ti else "",
+                arch_area=ti.get("건축면적","") if ti else "")
+
+    # ★★★ 전유부가 "공동주택"인데 건물명에 빌라/빌리지 → 재분류 ★★★
+    if tfu == "공동주택" and ti:
+        bn_all = (
+            (mu.get("bldNm","") if mu else "") or
+            ti.get("건물명","") or
+            (pi.get("건물명","") if pi else "") or
+            (juso.get("bdNm","") if juso else "")
+        )
+        if any(k in bn_all for k in VILLA_KW):
+            tfu = classify_housing_type(
+                purps_cd=ti.get("주용도코드",""),
+                purps_nm=ti.get("주용도","") or "공동주택",
+                bld_nm=bn_all,
+                hhld=ti.get("세대수",""),
+                grnd_flr=ti.get("지상층수",""),
+                arch_area=ti.get("건축면적",""),
+                plat_area=ti.get("대지면적",""),
+            )
+            tft = ""  # 표제부의 "아파트" 무력화
+
+    # 다세대 → 도시형 우선
     if tfu == "다세대주택" and (tft == "도시형생활주택" or tfp == "도시형생활주택"): tfu = ""
+
     tc = [(tfu,"전유부기반"),(tft,"표제부기반"),(tfp,"인허가API")]
     ht = ""; hs = ""; bs = 0
     for t, s in tc:
@@ -597,6 +650,7 @@ def process_address(address, progress=None):
     if not ht:
         for t, s in tc:
             if t: ht = t; hs = s; break
+
     if area:
         return {"주소":address,"전용면적":f"{area:.2f}㎡ ({round(area*0.3025)}평)","대지면적":"","주택유형":ht or "-","유형출처":hs,"상태":status}, {"api_debug":ad}
     if ti and ti.get("연면적"):
