@@ -138,7 +138,7 @@ def validate_juso(ui, ji):
     return ur.replace(" ","") in jn and un in jn
 
 # ============================================================
-# Juso API (응답 데이터 형식 완벽 방어)
+# Juso API
 # ============================================================
 def search_juso_single(kw):
     p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":10, "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
@@ -185,46 +185,49 @@ def search_juso(a):
     return None, f"주소 매칭 실패: {lm}", ad
 
 def search_address_candidates(kw, cnt=20):
-    if not kw or not str(kw).strip():
-        return [], "검색어가 비어 있습니다."
-        
-    p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
+    # 무조건 2개의 튜플 (리스트, 문자열)을 리턴하도록 보장
     try:
-        r = requests.get(JUSO_API_URL, params=p, timeout=10)
-        data = r.json()
-    except (requests.exceptions.RequestException, ValueError) as e:
-        return [], f"요청 실패: {e}"
-
-    # ★★★ API 응답이 딕셔너리가 아닐 경우 방어 ★★★
-    if not isinstance(data, dict):
-        return [], "API 응답 형식 오류 (데이터 없음)"
-
-    # ★★★ results 노드가 딕셔너리가 아닐 경우 방어 ★★★
-    results_obj = data.get("results", {})
-    if not isinstance(results_obj, dict):
-        return [], "API 응답 형식 오류 (results 노드 오류)"
-
-    c = results_obj.get("common", {})
-    if not isinstance(c, dict): c = {}
-    
-    if c.get("errorCode","") not in ("","0"): 
-        return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
+        if not kw or not str(kw).strip():
+            return [], "검색어가 비어 있습니다."
+            
+        p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
         
-    # ★★★ juso 노드가 리스트가 아니거나 없을 경우 방어 ★★★
-    jl = results_obj.get("juso", [])
-    if jl is None:
-        jl = []
-    if not isinstance(jl, list):
-        jl = [jl] if jl else []
+        try:
+            r = requests.get(JUSO_API_URL, params=p, timeout=10)
+            data = r.json()
+        except requests.exceptions.RequestException as e:
+            return [], f"요청 실패: {e}"
+        except ValueError:
+            return [], "API 응답이 올바른 JSON 형식이 아닙니다."
+
+        if not isinstance(data, dict):
+            return [], "API 응답이 딕셔너리 형식이 아닙니다."
+
+        results_obj = data.get("results", {})
+        if not isinstance(results_obj, dict):
+            return [], "API 응답 내 results 데이터가 올바르지 않습니다."
+
+        c = results_obj.get("common", {})
+        if not isinstance(c, dict): c = {}
         
-    res = []
-    for j in jl:
-        if not isinstance(j, dict): continue
-        fr = j.get("roadAddr","") or ""
-        cr = clean_addr(fr)
-        res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
-                    "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
-    return res, None
+        if c.get("errorCode","") not in ("","0"): 
+            return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
+            
+        jl = results_obj.get("juso", [])
+        if jl is None: jl = []
+        if not isinstance(jl, list): jl = [jl] if jl else []
+            
+        res = []
+        for j in jl:
+            if not isinstance(j, dict): continue
+            fr = j.get("roadAddr","") or ""
+            cr = clean_addr(fr)
+            res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
+                        "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
+        return res, None
+    except Exception as e:
+        # 예상치 못한 모든 에러를 잡아서 반환
+        return [], f"검색 중 치명적 오류: {str(e)}"
 
 # ============================================================
 # 국토부 API
@@ -777,14 +780,21 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색", expande
     c1, c2 = st.columns([4,1])
     with c1: kw = st.text_input("검색어", key="juso_search_kw", placeholder="예: 반포자이 / 관문로 106", label_visibility="collapsed")
     with c2: ds = st.button("🔍 검색", use_container_width=True)
+    
     if ds:
         if not kw.strip(): st.warning("검색어 입력")
         else:
             with st.spinner("검색 중..."):
-                # ★ 안전한 언패킹
-                cd, er = search_address_candidates(kw.strip(), count=20)
-            st.session_state.search_candidates = cd
-            st.session_state.search_error = er
+                # ★★★ [핵심 수정] 함수가 어떤 값을 리턴하든 절대 에러가 나지 않도록 방어 ★★★
+                ret = search_address_candidates(kw.strip(), count=20)
+                if isinstance(ret, tuple) and len(ret) == 2:
+                    cd, er = ret
+                elif isinstance(ret, list):
+                    cd, er = ret, None
+                else:
+                    cd, er = [], "검색 결과 반환 형식 오류"
+            st.session_state.search_candidates = cd if isinstance(cd, list) else []
+            st.session_state.search_error = er if isinstance(er, str) else None
             st.session_state.search_performed = True 
             st.session_state.show_search_results = True
             
