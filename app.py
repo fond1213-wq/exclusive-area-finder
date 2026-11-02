@@ -298,7 +298,7 @@ def search_juso(address):
                 return d, "정상", all_dbg
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
-# ★★★ [수정] 주소 검색 API 에러 완벽 방어 (TypeError 원천 차단) ★★★
+# ★★★ 주소 검색 API 에러 완벽 방어 ★★★
 def search_address_candidates(keyword, count=20):
     try:
         if not keyword or not str(keyword).strip():
@@ -439,6 +439,7 @@ def _bjdong_variants(bjdongCd, alt=None):
             _add(bjdongCd[:-2] + "00")
     return variants
 
+# ★★★ 호수 매칭 엄격화 (1201호 오매칭 방지) ★★★
 def _ho_matches(target_ho, ho_text):
     target = str(target_ho).strip()
     h = str(ho_text or "").strip()
@@ -446,22 +447,26 @@ def _ho_matches(target_ho, ho_text):
         return False
     if is_match(target, h):
         return True
+    
+    # "OO호" 형태로 정확히 매칭되는지 확인
     for m in re.finditer(r"(\d+)\s*호", h):
         if m.group(1) == target:
             return True
+            
+    # 층수(예: 13층) 제거 후 정확히 매칭되는지 확인
     h_cleaned = h
     for _ in range(3):
         h_cleaned = re.sub(r"\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)", " ", h_cleaned)
         h_cleaned = re.sub(r"(?:층|F|f|FLR|flr)\s*\d+", " ", h_cleaned)
     if re.search(rf"(?<!\d){re.escape(target)}(?!\d)", h_cleaned):
         return True
-    all_nums = re.findall(r"\d+", h)
-    if all_nums and all_nums[-1] == target:
-        return True
-    tokens = re.split(r"[\s\-_/]+", h)
+        
+    # 완전히 동일한 토큰인 경우만 허용 (기존 숫자 포함 로직 제거)
+    tokens = re.split(r"[\s\-_/]+", h_cleaned)
     for t in tokens:
         if t == target:
             return True
+            
     return False
 
 def _is_exclusive(item):
@@ -493,7 +498,7 @@ def _dong_matches(target_dong, item_dong):
         return True
     return False
 
-# ★★★ [수정] 동/호수 매칭 다각화로 1301호 찾기 보완 ★★★
+# ★★★ 1301호 탐색을 위한 층수 결합 필터 복구 및 강화 ★★★
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
@@ -588,21 +593,30 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    # ★★★ 필터 조합 대폭 확장 (동/호수가 붙어서 오거나 띄어쓰기가 다를 때 대비) ★★★
+    # ★★★ 층수 결합 필터 추가 ★★★
     filter_attempts = []
     if target_dong:
-        filter_attempts = [
+        filter_attempts.extend([
             {"dongNm": f"{target_dong}동", "hoNm": str(target_ho)},
             {"dongNm": f"{target_dong}동", "hoNm": f"{target_ho}호"},
             {"dongNm": str(target_dong), "hoNm": str(target_ho)},
             {"dongNm": str(target_dong), "hoNm": f"{target_ho}호"},
-        ]
+        ])
+    
+    if len(str(target_ho)) >= 3:
+        floor_num = str(int(target_ho) // 100)
+        for suf in ("", "호"):
+            fpx = f"{floor_num}층{target_ho}{suf}"
+            if target_dong:
+                filter_attempts.append({"dongNm": f"{target_dong}동", "hoNm": fpx})
+                filter_attempts.append({"dongNm": str(target_dong), "hoNm": fpx})
+            filter_attempts.append({"hoNm": fpx})
+            
     filter_attempts.append({"hoNm": str(target_ho)})
     filter_attempts.append({"hoNm": f"{target_ho}호"})
 
-    first_combo = combos[0] if combos else None
-    if first_combo:
-        pg, bd, b, j = first_combo
+    # 모든 지번 조합에 대해 필터를 적용하여 조회
+    for pg, bd, b, j in combos:
         for extra in filter_attempts:
             area_list, err1, dbg1 = call_api_all_pages(
                 "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
@@ -616,10 +630,10 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                     if val is not None:
                         return val, "조회 성공 (필터)", all_errors, all_debug, a
 
+    # 필터로 못 찾으면 전체 데이터를 긁어와서 매칭
     survey_items = []
     any_data_found = False
-    if first_combo:
-        pg, bd, b, j = first_combo
+    for pg, bd, b, j in combos:
         area_list, err1, dbg1 = call_api_all_pages(
             "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
             match_check=None, extra_params=None, collect_all=True)
@@ -629,26 +643,15 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         if area_list:
             any_data_found = True
             survey_items.extend(area_list)
-
-    if not survey_items:
-        for pg, bd, b, j in combos[1:]:
-            area_list, err1, dbg1 = call_api_all_pages(
-                "getBrExposPubuseAreaInfo", sigunguCd, bd, pg, b, j,
-                match_check=None, extra_params=None, collect_all=True)
-            if err1:
-                all_errors.append(err1)
-            all_debug.extend(dbg1)
-            if area_list:
-                any_data_found = True
-                survey_items.extend(area_list)
-                break
+            # 전체 조회 후 바로 매칭 시도
+            for a in area_list:
+                if _matches(a):
+                    val = _safe_area(a)
+                    if val is not None:
+                        return val, "조회 성공 (전체조회)", all_errors, all_debug, a
+            break
 
     if survey_items:
-        for a in survey_items:
-            if _matches(a):
-                val = _safe_area(a)
-                if val is not None:
-                    return val, "조회 성공 (전체조회)", all_errors, all_debug, a
         for a in survey_items:
             if _matches_relaxed(a):
                 val = _safe_area(a)
@@ -671,6 +674,7 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
         hint += f" | ★ 매칭: {similar_hos}"
     status = f"동/호 매칭 실패 | {hint}"
     return None, status, all_errors, all_debug, None
+
 
 # ============================================================
 # 총괄표제부
@@ -697,6 +701,7 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                     "건축면적": item.get("archArea", "") or "",
                 }, all_debug
     return None, all_debug
+
 
 # ============================================================
 # 인허가정보 API
@@ -742,6 +747,7 @@ def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
                 continue
     return None, "건축인허가 주택유형 정보 없음", all_debug
 
+
 def normalize_hstp_type(code_nm, code=""):
     nm = str(code_nm or "").strip()
     cd = str(code or "").strip()
@@ -758,8 +764,9 @@ def normalize_hstp_type(code_nm, code=""):
     if cd == "3": return "공동주택"
     return nm or ""
 
+
 # ============================================================
-# 표제부 조회 (★ 정확한 동/호수 매칭을 위한 헬퍼 복구 ★)
+# 표제부 조회
 # ============================================================
 def _pick_best_title(all_items, target_dong, target_ho):
     if not all_items:
@@ -828,7 +835,6 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
     if not all_items_collected:
         return None, "표제부 정보 없음", all_debug
 
-    # ★★★ 첫 번째 항목을 무조건 쓰지 않고, 동/호수에 맞는 최적의 표제부를 고름 ★★★
     chosen = _pick_best_title(all_items_collected, target_dong, target_ho)
     if chosen is None:
         chosen = all_items_collected[0]
@@ -862,6 +868,7 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
                 if not cur or str(cur).strip() in ("0", "0.0", "0.00"):
                     info[k] = v
     return info, None, all_debug
+
 
 def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
                            hhld="", grnd_flr="", plat_area="", arch_area="",
@@ -909,12 +916,14 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
         return nm or "비주거용"
     return nm or "미분류"
 
+
 def _housing_specificity(t):
     if not t: return 0
     if "미분류" in t or "정보부족" in t: return 1
     if t == "공동주택": return 2
     if "추정" in t: return 5
     return 10
+
 
 # ============================================================
 # 프로세스
@@ -1070,6 +1079,7 @@ def process_address(address, progress=None):
         "상태": status,
     }, {}
 
+
 # ============================================================
 # 백그라운드 조회
 # ============================================================
@@ -1102,6 +1112,7 @@ def _background_query(query_id, addresses, user_id):
                 json.dump({"status": "error", "error": str(e)}, f, ensure_ascii=False)
         except IOError:
             pass
+
 
 # ============================================================
 # 결과 렌더링
@@ -1152,6 +1163,7 @@ def render_results(results):
     st.download_button("📥 CSV 다운로드", data=csv,
                        file_name="전용면적_주택유형_조회결과.csv",
                        mime="text/csv", use_container_width=True)
+
 
 # ============================================================
 # 상태 폴링
@@ -1206,6 +1218,7 @@ def render_query_status():
     elif status["status"] == "error":
         st.error(f"조회 오류: {status.get('error', '알 수 없음')}")
 
+
 # ============================================================
 # 7. UI
 # ============================================================
@@ -1241,7 +1254,11 @@ if recent_files:
             box-shadow: none !important;
             justify-content: flex-start !important;
           }
-          div.recent-toggle .stButton > button:hover,
+          div.recent-toggle .stButton > button:hover {
+            color: #777 !important;
+            background: transparent !important;
+            border: none !important;
+          }
           div.recent-toggle .stButton > button:focus {
             color: #777 !important;
             background: transparent !important;
@@ -1310,7 +1327,6 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.warning("검색어를 입력해주세요.")
         else:
             with st.spinner("검색 중..."):
-                # ★★★ [수정] 100% 튜플을 반환하므로 안전하게 2개 변수로 받음 ★★★
                 candidates, err = search_address_candidates(search_kw.strip(), count=20)
             st.session_state.search_candidates = candidates
             st.session_state.search_error = err
