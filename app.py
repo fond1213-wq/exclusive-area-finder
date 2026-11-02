@@ -241,15 +241,21 @@ def search_juso_single(keyword):
             data = res.json()
         except ValueError:
             return [], "JSON 파싱 실패", dbg
+        if not isinstance(data, dict):
+            return [], "API 응답 형식 오류", dbg
         common = data.get("results", {}).get("common", {})
+        if not isinstance(common, dict): common = {}
         if common.get("errorCode", "") not in ("", "0"):
             return [], f"오류 [{common.get('errorCode')}]", dbg
         juso_list = data.get("results", {}).get("juso", [])
+        if not isinstance(juso_list, list):
+            juso_list = [juso_list] if juso_list else []
         return juso_list, "정상", dbg
     except requests.exceptions.RequestException as e:
         return [], f"요청 실패: {e}", dbg
 
 def _juso_item_to_dict(j):
+    if not isinstance(j, dict): return None
     admCd = j.get("admCd", "")
     if len(admCd) < 10:
         return None
@@ -292,33 +298,60 @@ def search_juso(address):
                 return d, "정상", all_dbg
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
+# ★★★ [수정된 부분] 주소 검색 API 완벽 방어 ★★★
 def search_address_candidates(keyword, count=20):
-    params = {
-        "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": str(count),
-        "keyword": keyword, "resultType": "json", "addInfoYn": "Y",
-    }
+    """API 응답 오류 및 예외 발생 시 무조건 (list, str) 형태의 튜플 반환 보장"""
     try:
-        res = requests.get(JUSO_API_URL, params=params, timeout=10)
-        data = res.json()
-    except (requests.exceptions.RequestException, ValueError) as e:
-        return [], f"요청 실패: {e}"
-    common = data.get("results", {}).get("common", {})
-    if common.get("errorCode", "") not in ("", "0"):
-        return [], f"API 오류 [{common.get('errorCode')}] {common.get('errorMessage','')}"
-    juso_list = data.get("results", {}).get("juso", [])
-    results = []
-    for j in juso_list:
-        full_road = j.get("roadAddr", "")
-        clean_road = clean_address_for_parsing(full_road)
-        results.append({
-            "도로명주소": full_road,
-            "도로명주소_깔끔": clean_road,
-            "지번주소": j.get("jibunAddr", ""),
-            "건물명": j.get("bdNm", ""),
-            "우편번호": j.get("zipNo", ""),
-            "동목록": j.get("detBdNmList", ""),
-        })
-    return results, None
+        if not keyword or not str(keyword).strip():
+            return [], "검색어가 비어 있습니다."
+
+        params = {
+            "confmKey": JUSO_API_KEY, "currentPage": 1, "countPerPage": str(count),
+            "keyword": keyword, "resultType": "json", "addInfoYn": "Y",
+        }
+        
+        try:
+            res = requests.get(JUSO_API_URL, params=params, timeout=10)
+            data = res.json()
+        except requests.exceptions.RequestException as e:
+            return [], f"네트워크 요청 실패: {e}"
+        except ValueError:
+            return [], "API 응답이 올바른 JSON 형식이 아닙니다."
+
+        if not isinstance(data, dict):
+            return [], "API 응답 데이터가 올바르지 않습니다."
+
+        results_obj = data.get("results")
+        if not isinstance(results_obj, dict):
+            return [], "API 응답에 검색 결과(results)가 없습니다."
+
+        common = results_obj.get("common")
+        if isinstance(common, dict):
+            err_code = common.get("errorCode", "")
+            if err_code not in ("", "0"):
+                return [], f"API 오류 [{err_code}] {common.get('errorMessage','')}"
+
+        juso_list = results_obj.get("juso")
+        if not isinstance(juso_list, list):
+            juso_list = [juso_list] if juso_list else []
+
+        results = []
+        for j in juso_list:
+            if not isinstance(j, dict):
+                continue
+            full_road = j.get("roadAddr", "") or ""
+            clean_road = clean_address_for_parsing(full_road)
+            results.append({
+                "도로명주소": full_road,
+                "도로명주소_깔끔": clean_road,
+                "지번주소": j.get("jibunAddr", "") or "",
+                "건물명": j.get("bdNm", "") or "",
+                "우편번호": j.get("zipNo", "") or "",
+                "동목록": j.get("detBdNmList", "") or "",
+            })
+        return results, None
+    except Exception as e:
+        return [], f"검색 중 치명적 오류: {str(e)}"
 
 # ============================================================
 # 국토부 API 호출
@@ -407,7 +440,6 @@ def _bjdong_variants(bjdongCd, alt=None):
             _add(bjdongCd[:-2] + "00")
     return variants
 
-
 def _ho_matches(target_ho, ho_text):
     target = str(target_ho).strip()
     h = str(ho_text or "").strip()
@@ -433,7 +465,6 @@ def _ho_matches(target_ho, ho_text):
             return True
     return False
 
-
 def _is_exclusive(item):
     cd = str(item.get("exposPubuseGbCd", "")).strip()
     nm = str(item.get("exposPubuseGbCdNm", "")).strip()
@@ -452,7 +483,6 @@ def _is_exclusive(item):
         return True
     return False
 
-
 def _dong_matches(target_dong, item_dong):
     t = str(target_dong or "").strip()
     d = str(item_dong or "").strip()
@@ -463,7 +493,6 @@ def _dong_matches(target_dong, item_dong):
     if re.match(r"^\d+\s*(?:층|F|f|FLR|flr|th|st|nd|rd)$", d):
         return True
     return False
-
 
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
@@ -835,7 +864,7 @@ def _housing_specificity(t):
 
 
 # ============================================================
-# 프로세스 (★ 평 환산 반영)
+# 프로세스
 # ============================================================
 def process_address(address, progress=None):
     if not address:
@@ -888,20 +917,18 @@ def process_address(address, progress=None):
         type_from_permit = normalize_hstp_type(
             permit_info["주택유형코드명"], permit_info.get("주택유형코드", ""))
 
-    # ★ 단독주택: 연면적 + 평 환산
     if type_from_title in ("단독주택", "단독(다가구)주택") and type_info:
         tot = type_info.get("연면적", "")
         plat = type_info.get("대지면적", "")
         tot_str = plat_str = ""
         try:
             if tot and str(tot).strip() not in ("0", "0.0", "0.00"):
-                v = float(str(tot).replace(',', ''))
-                tot_str = f"{v:.2f}㎡ ({round(v * 0.3025)}평) (연면적)"
+                tot_str = _fmt_area_with_pyeong(tot, "(연면적)")
         except (ValueError, TypeError):
             pass
         try:
             if plat and str(plat).strip() not in ("0", "0.0", "0.00"):
-                plat_str = f"{float(str(plat).replace(',', '')):.2f}㎡"
+                plat_str = _fmt_area_with_pyeong(plat)
         except (ValueError, TypeError):
             pass
         return {
@@ -960,25 +987,22 @@ def process_address(address, progress=None):
                 housing_type_source = src
                 break
 
-    # ★ 전용면적 + 평 환산
     if area:
         conf = "확정" if (target_dong and target_ho) else "추정"
         return {
             "주소": address,
-            "전용면적": f"{area:.2f}㎡ ({round(area * 0.3025)}평)",
+            "전용면적": _fmt_area_with_pyeong(area),
             "대지면적": "",
             "주택유형": housing_type or "-",
             "유형출처": housing_type_source,
             "상태": f"{status} [{conf}]",
         }, {}
 
-    # ★ 연면적 폴백 + 평 환산
     if type_info and type_info.get("연면적"):
         try:
-            tot_val = float(str(type_info["연면적"]).replace(",", ""))
             return {
                 "주소": address,
-                "전용면적": f"{tot_val:.2f}㎡ ({round(tot_val * 0.3025)}평) (연면적 폴백)",
+                "전용면적": _fmt_area_with_pyeong(type_info.get("연면적"), "(연면적 폴백)"),
                 "대지면적": "",
                 "주택유형": housing_type or "-",
                 "유형출처": housing_type_source,
@@ -1139,7 +1163,7 @@ def render_query_status():
 st.title("🏠 건축물 전용면적 · 주택유형 조회")
 
 # ============================================================
-# ★ 최근 조회 결과 (모든 결과 / 기본 접힘 / 눈에 안 띄는 토글)
+# 최근 조회 결과
 # ============================================================
 if "show_recent" not in st.session_state:
     st.session_state.show_recent = False
@@ -1241,6 +1265,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.warning("검색어를 입력해주세요.")
         else:
             with st.spinner("검색 중..."):
+                # ★★★ [수정된 부분] 함수가 무조건 튜플을 리턴하므로 안전하게 분리 ★★★
                 candidates, err = search_address_candidates(search_kw.strip(), count=20)
             st.session_state.search_candidates = candidates
             st.session_state.search_error = err
