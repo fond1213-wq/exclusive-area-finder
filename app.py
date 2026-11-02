@@ -138,7 +138,7 @@ def validate_juso(ui, ji):
     return ur.replace(" ","") in jn and un in jn
 
 # ============================================================
-# Juso API (에러 방어 로직 강화)
+# Juso API (에러 완벽 방어)
 # ============================================================
 def search_juso_single(kw):
     p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":10, "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
@@ -185,38 +185,44 @@ def search_juso(a):
     return None, f"주소 매칭 실패: {lm}", ad
 
 def search_address_candidates(kw, cnt=20):
-    """주소 검색 후 무조건 (리스트, 에러메시지) 형태의 튜플을 반환하도록 방어"""
-    if not kw or not str(kw).strip():
-        return [], "검색어가 비어 있습니다."
-        
-    p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
+    """주소 검색 후 무조건 (리스트, 에러메시지) 형태의 튜플을 반환하도록 완벽 방어"""
     try:
-        r = requests.get(JUSO_API_URL, params=p, timeout=10)
-        data = r.json()
-    except requests.exceptions.RequestException as e:
-        return [], f"요청 실패: {e}"
-    except ValueError:
-        return [], "JSON 파싱 실패"
+        if not kw or not str(kw).strip():
+            return [], "검색어가 비어 있습니다."
+            
+        p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
         
-    if not isinstance(data, dict):
-        return [], "API 응답 형식 오류"
-        
-    c = data.get("results", {}).get("common", {})
-    if c.get("errorCode","") not in ("","0"): 
-        return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
-        
-    jl = data.get("results", {}).get("juso", [])
-    if not isinstance(jl, list):
-        jl = [jl] if jl else []
-        
-    res = []
-    for j in jl:
-        if not isinstance(j, dict): continue
-        fr = j.get("roadAddr","") or ""
-        cr = clean_addr(fr)
-        res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
-                    "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
-    return res, None
+        try:
+            r = requests.get(JUSO_API_URL, params=p, timeout=10)
+            data = r.json()
+        except requests.exceptions.RequestException as e:
+            return [], f"요청 실패: {e}"
+        except ValueError:
+            return [], "JSON 파싱 실패"
+            
+        if not isinstance(data, dict):
+            return [], "API 응답 형식 오류 (dict 아님)"
+            
+        c = data.get("results", {}).get("common", {})
+        if c.get("errorCode","") not in ("","0"): 
+            return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
+            
+        jl = data.get("results", {}).get("juso", [])
+        if jl is None: jl = []
+        if not isinstance(jl, list):
+            jl = [jl] if jl else []
+            
+        res = []
+        for j in jl:
+            if not isinstance(j, dict): continue
+            fr = j.get("roadAddr","") or ""
+            cr = clean_addr(fr)
+            res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
+                        "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
+        return res, None
+    except Exception as e:
+        # ★ 어떤 예외가 발생하더라도 절대 앱이 죽지 않고 에러 메시지를 반환
+        return [], f"검색 중 예상치 못한 오류: {str(e)}"
 
 # ============================================================
 # 국토부 API
@@ -775,12 +781,12 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색", expande
         if not kw.strip(): st.warning("검색어 입력")
         else:
             with st.spinner("검색 중..."):
-                # ★ 리턴값 안전하게 분해 (TypeError 방지)
+                # ★★★ 반환값 3중 안전 검증 (TypeError 원천 차단) ★★★
                 ret = search_address_candidates(kw.strip(), count=20)
                 if isinstance(ret, tuple) and len(ret) == 2:
                     cd, er = ret
                 else:
-                    cd, er = [], "검색 결과 형식 오류"
+                    cd, er = [], "검색 결과 형식 오류 (Tuple 반환 실패)"
             st.session_state.search_candidates = cd if isinstance(cd, list) else []
             st.session_state.search_error = er if isinstance(er, str) else None
             st.session_state.search_performed = True 
