@@ -138,7 +138,7 @@ def validate_juso(ui, ji):
     return ur.replace(" ","") in jn and un in jn
 
 # ============================================================
-# Juso API
+# Juso
 # ============================================================
 def search_juso_single(kw):
     p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":10, "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
@@ -147,8 +147,6 @@ def search_juso_single(kw):
         r = requests.get(JUSO_API_URL, params=p, timeout=10); d["sc"] = r.status_code
         try: data = r.json()
         except ValueError: return [], "JSON 파싱 실패", d
-        
-        if not isinstance(data, dict): return [], "API 응답 형식 오류", d
         c = data.get("results", {}).get("common", {})
         if c.get("errorCode","") not in ("","0"): return [], f"오류 [{c.get('errorCode')}]", d
         return data.get("results", {}).get("juso", []), "정상", d
@@ -185,49 +183,19 @@ def search_juso(a):
     return None, f"주소 매칭 실패: {lm}", ad
 
 def search_address_candidates(kw, cnt=20):
-    # 무조건 2개의 튜플 (리스트, 문자열)을 리턴하도록 보장
+    p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
     try:
-        if not kw or not str(kw).strip():
-            return [], "검색어가 비어 있습니다."
-            
-        p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
-        
-        try:
-            r = requests.get(JUSO_API_URL, params=p, timeout=10)
-            data = r.json()
-        except requests.exceptions.RequestException as e:
-            return [], f"요청 실패: {e}"
-        except ValueError:
-            return [], "API 응답이 올바른 JSON 형식이 아닙니다."
-
-        if not isinstance(data, dict):
-            return [], "API 응답이 딕셔너리 형식이 아닙니다."
-
-        results_obj = data.get("results", {})
-        if not isinstance(results_obj, dict):
-            return [], "API 응답 내 results 데이터가 올바르지 않습니다."
-
-        c = results_obj.get("common", {})
-        if not isinstance(c, dict): c = {}
-        
-        if c.get("errorCode","") not in ("","0"): 
-            return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
-            
-        jl = results_obj.get("juso", [])
-        if jl is None: jl = []
-        if not isinstance(jl, list): jl = [jl] if jl else []
-            
-        res = []
-        for j in jl:
-            if not isinstance(j, dict): continue
-            fr = j.get("roadAddr","") or ""
-            cr = clean_addr(fr)
-            res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
-                        "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
-        return res, None
-    except Exception as e:
-        # 예상치 못한 모든 에러를 잡아서 반환
-        return [], f"검색 중 치명적 오류: {str(e)}"
+        r = requests.get(JUSO_API_URL, params=p, timeout=10); data = r.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        return [], f"요청 실패: {e}"
+    c = data.get("results", {}).get("common", {})
+    if c.get("errorCode","") not in ("","0"): return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
+    jl = data.get("results", {}).get("juso", []); res = []
+    for j in jl:
+        fr = j.get("roadAddr",""); cr = clean_addr(fr)
+        res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr",""),
+                    "건물명": j.get("bdNm",""), "우편번호": j.get("zipNo",""), "동목록": j.get("detBdNmList","")})
+    return res, None
 
 # ============================================================
 # 국토부 API
@@ -314,6 +282,8 @@ def _norm_dig(s):
     if s is None: return ""
     s = str(s).translate(str.maketrans('０１２３４５６７８９','0123456789'))
     return re.sub(r"[\s\u00A0\u3000\u200B\u200C\u200D\uFEFF]+","",s)
+
+def _extract_nums(s): return re.findall(r"\d+", _norm_dig(s))
 
 def _safe_area(item):
     for f in ("area","exposArea","전유면적","exposPubuseArea","areaVal","exclusiveArea","전유면적(㎡)","areaExposPubuse","전유면적값","면적"):
@@ -641,6 +611,7 @@ def process_address(address, progress=None):
         unm = str(mu.get("mainPurpsCdNm","") or "").strip()
         ucd = str(mu.get("mainPurpsCd","") or "").strip()
         if unm or ucd:
+            # ★ 전유부 bldNm + juso/ti/pi 건물명 통합 (빌리지 감지)
             bnu = mu.get("bldNm","") or ""
             juso_bd = juso.get("bdNm","") if juso else ""
             ti_bd = ti.get("건물명","") if ti else ""
@@ -780,24 +751,12 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색", expande
     c1, c2 = st.columns([4,1])
     with c1: kw = st.text_input("검색어", key="juso_search_kw", placeholder="예: 반포자이 / 관문로 106", label_visibility="collapsed")
     with c2: ds = st.button("🔍 검색", use_container_width=True)
-    
     if ds:
         if not kw.strip(): st.warning("검색어 입력")
         else:
             with st.spinner("검색 중..."):
-                # ★★★ [핵심 수정] 함수가 어떤 값을 리턴하든 절대 에러가 나지 않도록 방어 ★★★
-                ret = search_address_candidates(kw.strip(), count=20)
-                if isinstance(ret, tuple) and len(ret) == 2:
-                    cd, er = ret
-                elif isinstance(ret, list):
-                    cd, er = ret, None
-                else:
-                    cd, er = [], "검색 결과 반환 형식 오류"
-            st.session_state.search_candidates = cd if isinstance(cd, list) else []
-            st.session_state.search_error = er if isinstance(er, str) else None
-            st.session_state.search_performed = True 
-            st.session_state.show_search_results = True
-            
+                cd, er = search_address_candidates(kw.strip(), count=20)
+            st.session_state.search_candidates = cd; st.session_state.search_error = er; st.session_state.search_performed = True; st.session_state.show_search_results = True
     if st.session_state.search_performed:
         er = st.session_state.search_error; cd = st.session_state.search_candidates
         if er: st.error(f"검색 실패: {er}")
