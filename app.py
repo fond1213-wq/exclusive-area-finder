@@ -138,7 +138,7 @@ def validate_juso(ui, ji):
     return ur.replace(" ","") in jn and un in jn
 
 # ============================================================
-# Juso
+# Juso API (에러 방어 로직 강화)
 # ============================================================
 def search_juso_single(kw):
     p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":10, "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
@@ -147,6 +147,8 @@ def search_juso_single(kw):
         r = requests.get(JUSO_API_URL, params=p, timeout=10); d["sc"] = r.status_code
         try: data = r.json()
         except ValueError: return [], "JSON 파싱 실패", d
+        
+        if not isinstance(data, dict): return [], "API 응답 형식 오류", d
         c = data.get("results", {}).get("common", {})
         if c.get("errorCode","") not in ("","0"): return [], f"오류 [{c.get('errorCode')}]", d
         return data.get("results", {}).get("juso", []), "정상", d
@@ -183,18 +185,37 @@ def search_juso(a):
     return None, f"주소 매칭 실패: {lm}", ad
 
 def search_address_candidates(kw, cnt=20):
+    """주소 검색 후 무조건 (리스트, 에러메시지) 형태의 튜플을 반환하도록 방어"""
+    if not kw or not str(kw).strip():
+        return [], "검색어가 비어 있습니다."
+        
     p = {"confmKey": JUSO_API_KEY, "currentPage":1, "countPerPage":str(cnt), "keyword":kw, "resultType":"json", "addInfoYn":"Y"}
     try:
-        r = requests.get(JUSO_API_URL, params=p, timeout=10); data = r.json()
-    except (requests.exceptions.RequestException, ValueError) as e:
+        r = requests.get(JUSO_API_URL, params=p, timeout=10)
+        data = r.json()
+    except requests.exceptions.RequestException as e:
         return [], f"요청 실패: {e}"
+    except ValueError:
+        return [], "JSON 파싱 실패"
+        
+    if not isinstance(data, dict):
+        return [], "API 응답 형식 오류"
+        
     c = data.get("results", {}).get("common", {})
-    if c.get("errorCode","") not in ("","0"): return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
-    jl = data.get("results", {}).get("juso", []); res = []
+    if c.get("errorCode","") not in ("","0"): 
+        return [], f"API 오류 [{c.get('errorCode')}] {c.get('errorMessage','')}"
+        
+    jl = data.get("results", {}).get("juso", [])
+    if not isinstance(jl, list):
+        jl = [jl] if jl else []
+        
+    res = []
     for j in jl:
-        fr = j.get("roadAddr",""); cr = clean_addr(fr)
-        res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr",""),
-                    "건물명": j.get("bdNm",""), "우편번호": j.get("zipNo",""), "동목록": j.get("detBdNmList","")})
+        if not isinstance(j, dict): continue
+        fr = j.get("roadAddr","") or ""
+        cr = clean_addr(fr)
+        res.append({"도로명주소": fr, "도로명주소_깔끔": cr, "지번주소": j.get("jibunAddr","") or "",
+                    "건물명": j.get("bdNm","") or "", "우편번호": j.get("zipNo","") or "", "동목록": j.get("detBdNmList","") or ""})
     return res, None
 
 # ============================================================
@@ -611,7 +632,6 @@ def process_address(address, progress=None):
         unm = str(mu.get("mainPurpsCdNm","") or "").strip()
         ucd = str(mu.get("mainPurpsCd","") or "").strip()
         if unm or ucd:
-            # ★ 전유부 bldNm + juso/ti/pi 건물명 통합 (빌리지 감지)
             bnu = mu.get("bldNm","") or ""
             juso_bd = juso.get("bdNm","") if juso else ""
             ti_bd = ti.get("건물명","") if ti else ""
@@ -755,8 +775,17 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색", expande
         if not kw.strip(): st.warning("검색어 입력")
         else:
             with st.spinner("검색 중..."):
-                cd, er = search_address_candidates(kw.strip(), count=20)
-            st.session_state.search_candidates = cd; st.session_state.search_error = er; st.session_state.search_performed = True; st.session_state.show_search_results = True
+                # ★ 리턴값 안전하게 분해 (TypeError 방지)
+                ret = search_address_candidates(kw.strip(), count=20)
+                if isinstance(ret, tuple) and len(ret) == 2:
+                    cd, er = ret
+                else:
+                    cd, er = [], "검색 결과 형식 오류"
+            st.session_state.search_candidates = cd if isinstance(cd, list) else []
+            st.session_state.search_error = er if isinstance(er, str) else None
+            st.session_state.search_performed = True 
+            st.session_state.show_search_results = True
+            
     if st.session_state.search_performed:
         er = st.session_state.search_error; cd = st.session_state.search_candidates
         if er: st.error(f"검색 실패: {er}")
