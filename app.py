@@ -298,9 +298,8 @@ def search_juso(address):
                 return d, "정상", all_dbg
     return None, f"주소 매칭 실패: {last_msg}", all_dbg
 
-# ★★★ [수정된 부분] 주소 검색 API 완벽 방어 ★★★
+# ★★★ [수정] 주소 검색 API 에러 완벽 방어 (TypeError 원천 차단) ★★★
 def search_address_candidates(keyword, count=20):
-    """API 응답 오류 및 예외 발생 시 무조건 (list, str) 형태의 튜플 반환 보장"""
     try:
         if not keyword or not str(keyword).strip():
             return [], "검색어가 비어 있습니다."
@@ -494,6 +493,7 @@ def _dong_matches(target_dong, item_dong):
         return True
     return False
 
+# ★★★ [수정] 동/호수 매칭 다각화로 1301호 찾기 보완 ★★★
 def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
                         target_dong, target_ho, juso=None, expected_bldNm=None):
     if not target_ho:
@@ -588,9 +588,17 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
             for b, j in bun_ji_candidates:
                 _add(pg, bd, b, j)
 
-    filter_attempts = [{"hoNm": str(target_ho)}]
+    # ★★★ 필터 조합 대폭 확장 (동/호수가 붙어서 오거나 띄어쓰기가 다를 때 대비) ★★★
+    filter_attempts = []
     if target_dong:
-        filter_attempts.insert(0, {"dongNm": str(target_dong), "hoNm": str(target_ho)})
+        filter_attempts = [
+            {"dongNm": f"{target_dong}동", "hoNm": str(target_ho)},
+            {"dongNm": f"{target_dong}동", "hoNm": f"{target_ho}호"},
+            {"dongNm": str(target_dong), "hoNm": str(target_ho)},
+            {"dongNm": str(target_dong), "hoNm": f"{target_ho}호"},
+        ]
+    filter_attempts.append({"hoNm": str(target_ho)})
+    filter_attempts.append({"hoNm": f"{target_ho}호"})
 
     first_combo = combos[0] if combos else None
     if first_combo:
@@ -664,7 +672,6 @@ def find_dedicated_area(sigunguCd, bjdongCd, bun, ji, platGbCd,
     status = f"동/호 매칭 실패 | {hint}"
     return None, status, all_errors, all_debug, None
 
-
 # ============================================================
 # 총괄표제부
 # ============================================================
@@ -690,7 +697,6 @@ def _fetch_recap_title(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None):
                     "건축면적": item.get("archArea", "") or "",
                 }, all_debug
     return None, all_debug
-
 
 # ============================================================
 # 인허가정보 API
@@ -736,7 +742,6 @@ def fetch_housing_type_from_permit(sigunguCd, bjdongCd, bun, ji, platGbCd):
                 continue
     return None, "건축인허가 주택유형 정보 없음", all_debug
 
-
 def normalize_hstp_type(code_nm, code=""):
     nm = str(code_nm or "").strip()
     cd = str(code or "").strip()
@@ -753,10 +758,57 @@ def normalize_hstp_type(code_nm, code=""):
     if cd == "3": return "공동주택"
     return nm or ""
 
+# ============================================================
+# 표제부 조회 (★ 정확한 동/호수 매칭을 위한 헬퍼 복구 ★)
+# ============================================================
+def _pick_best_title(all_items, target_dong, target_ho):
+    if not all_items:
+        return None
+    td = str(target_dong or "").strip()
 
-# ============================================================
-# 표제부 조회
-# ============================================================
+    def _match_dong(item):
+        if not td: return False
+        d = str(item.get("dongNm", "") or "").strip()
+        b = str(item.get("bldNm", "") or "").strip()
+        if d and (d == td or d == f"{td}동"): return True
+        if b:
+            if f"{td}동" in b: return True
+            if td.isdigit():
+                if re.search(rf"(?<!\d){re.escape(td)}(?!\d)", b): return True
+        return False
+
+    def _is_residential(item):
+        nm = str(item.get("mainPurpsCdNm", "") or "")
+        cd = str(item.get("mainPurpsCd", "") or "").strip().zfill(5)
+        if any(k in nm for k in ("주택", "아파트", "공동주택", "단독", "다세대", "연립", "다가구", "오피스텔")): return True
+        if cd.startswith("01") or cd.startswith("02") or cd == "14000": return True
+        return False
+
+    def _specificity(item):
+        cd = str(item.get("mainPurpsCd", "") or "").strip().zfill(5)
+        if cd in ("02001", "02002", "02003", "01000", "01001", "01003", "14000"): return 2
+        if cd.startswith("01") or cd.startswith("02"): return 1
+        return 0
+
+    def _use_day(item):
+        return str(item.get("useAprDay", "") or "")
+
+    def _rank(item):
+        return (_specificity(item), _use_day(item))
+
+    matched_dong = [it for it in all_items if _match_dong(it)]
+    if matched_dong:
+        residential = [it for it in matched_dong if _is_residential(it)]
+        chosen_list = residential if residential else matched_dong
+        return sorted(chosen_list, key=_rank, reverse=True)[0]
+
+    residential_all = [it for it in all_items if _is_residential(it)]
+    if residential_all:
+        return sorted(residential_all, key=_rank, reverse=True)[0]
+
+    return sorted(all_items, key=_rank, reverse=True)[0]
+
+
 def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
                         target_dong="", target_ho=""):
     bjdong_variants = _bjdong_variants(bjdongCd, juso.get("bjdongCd_alt") if juso else None)
@@ -776,7 +828,11 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
     if not all_items_collected:
         return None, "표제부 정보 없음", all_debug
 
-    chosen = all_items_collected[0]
+    # ★★★ 첫 번째 항목을 무조건 쓰지 않고, 동/호수에 맞는 최적의 표제부를 고름 ★★★
+    chosen = _pick_best_title(all_items_collected, target_dong, target_ho)
+    if chosen is None:
+        chosen = all_items_collected[0]
+
     info = {
         "주용도코드": chosen.get("mainPurpsCd", "") or "",
         "주용도": chosen.get("mainPurpsCdNm", "") or "",
@@ -806,7 +862,6 @@ def fetch_building_type(sigunguCd, bjdongCd, bun, ji, platGbCd, juso=None,
                 if not cur or str(cur).strip() in ("0", "0.0", "0.00"):
                     info[k] = v
     return info, None, all_debug
-
 
 def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
                            hhld="", grnd_flr="", plat_area="", arch_area="",
@@ -854,14 +909,12 @@ def classify_housing_type(purps_cd="", purps_nm="", etc_purps="", bld_nm="",
         return nm or "비주거용"
     return nm or "미분류"
 
-
 def _housing_specificity(t):
     if not t: return 0
     if "미분류" in t or "정보부족" in t: return 1
     if t == "공동주택": return 2
     if "추정" in t: return 5
     return 10
-
 
 # ============================================================
 # 프로세스
@@ -1017,7 +1070,6 @@ def process_address(address, progress=None):
         "상태": status,
     }, {}
 
-
 # ============================================================
 # 백그라운드 조회
 # ============================================================
@@ -1050,7 +1102,6 @@ def _background_query(query_id, addresses, user_id):
                 json.dump({"status": "error", "error": str(e)}, f, ensure_ascii=False)
         except IOError:
             pass
-
 
 # ============================================================
 # 결과 렌더링
@@ -1101,7 +1152,6 @@ def render_results(results):
     st.download_button("📥 CSV 다운로드", data=csv,
                        file_name="전용면적_주택유형_조회결과.csv",
                        mime="text/csv", use_container_width=True)
-
 
 # ============================================================
 # 상태 폴링
@@ -1156,7 +1206,6 @@ def render_query_status():
     elif status["status"] == "error":
         st.error(f"조회 오류: {status.get('error', '알 수 없음')}")
 
-
 # ============================================================
 # 7. UI
 # ============================================================
@@ -1192,11 +1241,7 @@ if recent_files:
             box-shadow: none !important;
             justify-content: flex-start !important;
           }
-          div.recent-toggle .stButton > button:hover {
-            color: #777 !important;
-            background: transparent !important;
-            border: none !important;
-          }
+          div.recent-toggle .stButton > button:hover,
           div.recent-toggle .stButton > button:focus {
             color: #777 !important;
             background: transparent !important;
@@ -1265,7 +1310,7 @@ with st.expander("🔍 도로명주소 / 건물명으로 먼저 검색해보기 
             st.warning("검색어를 입력해주세요.")
         else:
             with st.spinner("검색 중..."):
-                # ★★★ [수정된 부분] 함수가 무조건 튜플을 리턴하므로 안전하게 분리 ★★★
+                # ★★★ [수정] 100% 튜플을 반환하므로 안전하게 2개 변수로 받음 ★★★
                 candidates, err = search_address_candidates(search_kw.strip(), count=20)
             st.session_state.search_candidates = candidates
             st.session_state.search_error = err
